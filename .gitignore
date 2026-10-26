@@ -39,3 +39,26 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Dependencies in all project folders
+node_modules/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Firebase local cache and runtime secrets
+.firebase/
+.runtimeconfig.json
+
+# Firebase service account credentials
+*service-account*.json
+*serviceAccount*.json
+*-firebase-adminsdk-*.json
+
+# Firebase debug logs
+firebase-debug.log*
+
+test-email-preview.js
+functions/test-email-preview.js

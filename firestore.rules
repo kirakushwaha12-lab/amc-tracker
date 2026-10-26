@@ -1,0 +1,147 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function hasUserDocument() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        );
+    }
+
+    function userData() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      ).data;
+    }
+
+    function isActiveUser() {
+      return hasUserDocument()
+        && userData().active != false;
+    }
+
+    function userRole() {
+      return userData().role;
+    }
+
+    function isSuperAdmin() {
+      return signedIn()
+        && (
+          request.auth.uid == "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92"
+          || (
+            isActiveUser()
+            && userRole() == "Super Admin"
+          )
+        );
+    }
+
+    function isAdmin() {
+      return isActiveUser()
+        && userRole() == "Admin";
+    }
+
+    function canManageUsers() {
+      return isSuperAdmin() || isAdmin();
+    }
+
+    function canReadRecords() {
+      return isSuperAdmin() || (
+        isActiveUser()
+        && userRole() in [
+          "Admin",
+          "Editor",
+          "Viewer",
+          "User"
+        ]
+      );
+    }
+
+    function canEditRecords() {
+      return isSuperAdmin() || (
+        isActiveUser()
+        && userRole() in ["Admin", "Editor"]
+      );
+    }
+
+    function validAdminCreatedUser() {
+      return isAdmin()
+        && request.resource.data.keys().hasAll([
+          "name",
+          "email",
+          "department",
+          "role",
+          "active",
+          "createdAt",
+          "createdBy"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "name",
+          "email",
+          "department",
+          "role",
+          "active",
+          "createdAt",
+          "createdBy"
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.department is string
+        && request.resource.data.role in ["Viewer", "Editor"]
+        && request.resource.data.active == true
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+    }
+
+    match /users/{userId} {
+
+      // Users apna profile padh sakte hain.
+      // Admin aur Super Admin user profiles dekh sakte hain.
+      allow get: if signedIn()
+        && (
+          request.auth.uid == userId
+          || canManageUsers()
+        );
+
+      // User list sirf Admin aur Super Admin ko.
+      allow list: if canManageUsers();
+
+      // Super Admin koi bhi valid user profile create kar sakta hai.
+      // Admin sirf Viewer aur Editor profiles create kar sakta hai.
+      allow create: if isSuperAdmin()
+        || validAdminCreatedUser();
+
+      // Role/status changes sirf Super Admin kar sakta hai.
+      allow update, delete: if isSuperAdmin();
+    }
+
+    match /it_devices/{documentId} {
+      allow read: if canReadRecords();
+      allow create, update: if canEditRecords();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /vehicles/{documentId} {
+      allow read: if canReadRecords();
+      allow create, update: if canEditRecords();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /insurance_policies/{documentId} {
+      allow read: if canReadRecords();
+      allow create, update: if canEditRecords();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /compliance_records/{documentId} {
+      allow read: if canReadRecords();
+      allow create, update: if canEditRecords();
+      allow delete: if isSuperAdmin();
+    }
+  }
+}
