@@ -1,0 +1,37 @@
+name: Daily Expiry Email Reminders
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Send expiry reminders
+        working-directory: functions
+        run: node send-expiry-reminders.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EXTRA_EMAILS: ${{ secrets.EXTRA_EMAILS }}
+          TEST_MODE: ${{ secrets.TEST_MODE }}
+          TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+          FORCE_TEST_EMAIL: ${{ secrets.FORCE_TEST_EMAIL }}
