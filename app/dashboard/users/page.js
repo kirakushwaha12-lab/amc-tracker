@@ -392,10 +392,9 @@ export default function UsersPage() {
         const nextStatus = makeActive ? "Active" : "Inactive";
 
         const confirmed = window.confirm(
-            `${makeActive ? "Activate" : "Deactivate"} ${item.name}'s account? ${
-                makeActive
-                    ? "The account will be allowed to access permitted records."
-                    : "The account will lose access to protected tracker records."
+            `${makeActive ? "Activate" : "Deactivate"} ${item.name}'s account? ${makeActive
+                ? "The account will be allowed to access permitted records."
+                : "The account will lose access to protected tracker records."
             }`
         );
 
@@ -520,17 +519,31 @@ export default function UsersPage() {
                         </p>
                     </div>
 
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setShowForm((previous) => !previous);
-                            setError("");
-                            setSuccess("");
-                        }}
-                        className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
-                    >
-                        {showForm ? "Cancel" : "+ Add User"}
-                    </button>
+
+                    <div className="flex flex-wrap gap-3">
+                        {superAdmin && (
+                            <button
+                                type="button"
+                                onClick={() => router.push("/dashboard/reminder-settings")}
+                                className="rounded-xl border border-blue-700 px-5 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50"
+                            >
+                                Expiry Reminder Settings
+                            </button>
+                        )}
+
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setShowForm((previous) => !previous);
+                                setError("");
+                                setSuccess("");
+                            }}
+                            className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
+                        >
+                            {showForm ? "Cancel" : "+ Add User"}
+                        </button>
+                    </div>
+
                 </div>
 
                 {admin && (
@@ -739,11 +752,10 @@ export default function UsersPage() {
 
                                             <td className="px-5 py-4">
                                                 <span
-                                                    className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
-                                                        item.status === "Active"
+                                                    className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${item.status === "Active"
                                                             ? "bg-emerald-50 text-emerald-700"
                                                             : "bg-red-50 text-red-700"
-                                                    }`}
+                                                        }`}
                                                 >
                                                     {item.status}
                                                 </span>
@@ -751,8 +763,8 @@ export default function UsersPage() {
 
                                             <td className="px-5 py-4">
                                                 {!superAdmin ||
-                                                isProtectedAdmin ||
-                                                isSelf ? (
+                                                    isProtectedAdmin ||
+                                                    isSelf ? (
                                                     <span className="text-xs text-slate-400">
                                                         {isProtectedAdmin || isSelf
                                                             ? "Protected"
@@ -789,17 +801,16 @@ export default function UsersPage() {
                                                             onClick={() =>
                                                                 handleStatusToggle(item)
                                                             }
-                                                            className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${
-                                                                item.status === "Active"
+                                                            className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${item.status === "Active"
                                                                     ? "border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
                                                                     : "border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                                                            }`}
+                                                                }`}
                                                         >
                                                             {isUpdating
                                                                 ? "Please wait..."
                                                                 : item.status === "Active"
-                                                                  ? "Deactivate"
-                                                                  : "Activate"}
+                                                                    ? "Deactivate"
+                                                                    : "Activate"}
                                                         </button>
 
                                                         <button

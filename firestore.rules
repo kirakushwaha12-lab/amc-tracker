@@ -120,6 +120,12 @@ service cloud.firestore {
       allow update, delete: if isSuperAdmin();
     }
 
+    // Expiry Reminder Settings
+    // Only Super Admin can read, create, update or delete settings.
+    match /app_settings/{settingId} {
+      allow read, write: if isSuperAdmin();
+    }
+    
     match /it_devices/{documentId} {
       allow read: if canReadRecords();
       allow create, update: if canEditRecords();
