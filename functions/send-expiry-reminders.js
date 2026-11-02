@@ -34,6 +34,7 @@ const TIME_ZONE = "Asia/Kolkata";
 
 const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
+const DEFAULT_EMAIL_TIME = "09:30";
 
 const MODULE_CONFIG = [
     {
@@ -216,7 +217,44 @@ function getReminderDays(settings) {
     return [...new Set([...valid, 0])]
         .sort((a, b) => b - a);
 }
+function getEmailTime(settings) {
+    const value = String(
+        settings?.emailTime || DEFAULT_EMAIL_TIME
+    ).trim();
 
+    // Only allow 15-minute interval times.
+    if (!/^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)) {
+        return DEFAULT_EMAIL_TIME;
+    }
+
+    return value;
+}
+
+function getCurrentTimeInIndia() {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: TIME_ZONE,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(new Date());
+
+    const values = {};
+
+    for (const part of parts) {
+        values[part.type] = part.value;
+    }
+
+    return `${values.hour}:${values.minute}`;
+}
+
+function isEmailTimeReached(emailTime) {
+    const currentTime = getCurrentTimeInIndia();
+
+    return {
+        reached: currentTime >= emailTime,
+        currentTime,
+    };
+}
 async function getReminderSettings() {
     try {
         const snapshot = await db
@@ -392,25 +430,22 @@ function buildEmailHtml(records, today, isTest) {
             <h2>AMIN INTERNATIONAL LIMITED</h2>
             <h3>Expiry &amp; Renewal Reminder</h3>
 
-            ${
-                isTest
-                    ? "<p><strong>TEST EMAIL:</strong> This message is for testing only. Actual recipient routing is not being tested.</p>"
-                    : ""
-            }
+            ${isTest
+            ? "<p><strong>TEST EMAIL:</strong> This message is for testing only. Actual recipient routing is not being tested.</p>"
+            : ""
+        }
 
             <p>Date: ${displayDate(today)}</p>
 
             <p>
-                ${
-                    records.length
-                        ? "The following records require your attention:"
-                        : "This is a test email. No reminders are due today."
-                }
+                ${records.length
+            ? "The following records require your attention:"
+            : "This is a test email. No reminders are due today."
+        }
             </p>
 
-            ${
-                records.length
-                    ? `
+            ${records.length
+            ? `
                         <table cellpadding="8" cellspacing="0" border="1"
                             style="border-collapse:collapse;width:100%">
                             <thead>
@@ -425,8 +460,8 @@ function buildEmailHtml(records, today, isTest) {
                             <tbody>${rows}</tbody>
                         </table>
                     `
-                    : ""
-            }
+            : ""
+        }
 
             <p>Please review the Expiry &amp; Renewal Tracker as needed.</p>
         </div>
@@ -595,7 +630,7 @@ async function buildProductionRecipients(
     const recipientMap = new Map();
     const operatorsByModule =
         settings.moduleOperators &&
-        typeof settings.moduleOperators === "object"
+            typeof settings.moduleOperators === "object"
             ? settings.moduleOperators
             : {};
 
@@ -663,10 +698,26 @@ async function main() {
 
     const settings = await getReminderSettings();
     const reminderDays = getReminderDays(settings);
+    const emailTime = getEmailTime(settings);
+
+    const timeCheck = isEmailTimeReached(emailTime);
 
     console.log(
         `India date: ${today}; reminder days: ${reminderDays.join(", ")}`
     );
+
+    console.log(
+        `Configured email time: ${emailTime} IST; current India time: ${timeCheck.currentTime} IST`
+    );
+
+    if (!timeCheck.reached) {
+        console.log(
+            `Email time not reached. Skipping this run. Next eligible time: ${emailTime} IST.`
+        );
+        return;
+    }
+
+    console.log("Configured email time reached. Checking expiry records...");
 
     const records = await getAllExpiryRecords(
         today,
