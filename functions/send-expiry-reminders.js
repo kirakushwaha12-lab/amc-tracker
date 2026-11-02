@@ -28,11 +28,13 @@ const TEST_EMAIL = String(process.env.TEST_EMAIL || "")
 
 const FORCE_TEST_EMAIL =
     String(process.env.FORCE_TEST_EMAIL || "false").toLowerCase() === "true";
-
+const ROUTING_DRY_RUN =
+    String(process.env.ROUTING_DRY_RUN || "false").toLowerCase() === "true";
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const TIME_ZONE = "Asia/Kolkata";
 
 const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
+
 const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
 
@@ -85,7 +87,15 @@ admin.initializeApp({
 const db = admin.firestore();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// --------------------------------------------------
+// DATE HELPERS
+// --------------------------------------------------
+
 function dateInIndia(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+
     const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: TIME_ZONE,
         year: "numeric",
@@ -102,6 +112,22 @@ function dateInIndia(date) {
     return `${values.year}-${values.month}-${values.day}`;
 }
 
+function isValidDateString(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return false;
+    }
+
+    const [year, month, day] = value.split("-").map(Number);
+
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    return (
+        date.getUTCFullYear() === year &&
+        date.getUTCMonth() === month - 1 &&
+        date.getUTCDate() === day
+    );
+}
+
 function getTodayInIndia() {
     return dateInIndia(new Date());
 }
@@ -109,11 +135,12 @@ function getTodayInIndia() {
 function toDateString(value) {
     if (!value) return "";
 
-    // Date-only strings must not shift because of timezone conversion.
     if (typeof value === "string") {
         const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
 
-        if (match) return match[1];
+        if (match) {
+            return isValidDateString(match[1]) ? match[1] : "";
+        }
 
         const parsed = new Date(value);
 
@@ -166,6 +193,17 @@ function firstValue(data, keys) {
     return "";
 }
 
+// Returns the first valid date, not merely the first non-empty field.
+function firstValidDate(data, keys) {
+    for (const key of keys) {
+        const date = toDateString(data[key]);
+
+        if (date) return date;
+    }
+
+    return "";
+}
+
 function normalize(value) {
     return String(value || "")
         .trim()
@@ -181,7 +219,9 @@ function isValidEmail(email) {
 }
 
 function displayDate(value) {
-    if (!value) return "Not available";
+    if (!value || !isValidDateString(value)) {
+        return "Not available";
+    }
 
     const [year, month, day] = value.split("-");
 
@@ -189,7 +229,7 @@ function displayDate(value) {
 }
 
 function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (character) => ({
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
@@ -197,6 +237,10 @@ function escapeHtml(value) {
         "'": "&#39;",
     })[character]);
 }
+
+// --------------------------------------------------
+// REMINDER SETTINGS
+// --------------------------------------------------
 
 function getReminderDays(settings) {
     const configured = settings?.reminderDays;
@@ -217,12 +261,12 @@ function getReminderDays(settings) {
     return [...new Set([...valid, 0])]
         .sort((a, b) => b - a);
 }
+
 function getEmailTime(settings) {
     const value = String(
         settings?.emailTime || DEFAULT_EMAIL_TIME
     ).trim();
 
-    // Only allow 15-minute interval times.
     if (!/^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)) {
         return DEFAULT_EMAIL_TIME;
     }
@@ -255,62 +299,80 @@ function isEmailTimeReached(emailTime) {
         currentTime,
     };
 }
+
 async function getReminderSettings() {
-    try {
-        const snapshot = await db
-            .collection("app_settings")
-            .doc("expiryReminders")
-            .get();
+    const snapshot = await db
+        .collection("app_settings")
+        .doc("expiryReminders")
+        .get();
 
-        return snapshot.exists ? snapshot.data() : {};
-    } catch (error) {
-        console.error(
-            "Could not read reminder settings. Using defaults:",
-            error.message
-        );
-
-        return {};
-    }
+    return snapshot.exists ? snapshot.data() : {};
 }
+
+// --------------------------------------------------
+// USER DIRECTORY
+// --------------------------------------------------
 
 async function getUserDirectory() {
     const snapshot = await db.collection("users").get();
 
     const usersByUid = new Map();
     const superAdmins = [];
+    const admins = [];
 
     for (const document of snapshot.docs) {
         const data = document.data();
+
         const email = String(data.email || "")
             .trim()
             .toLowerCase();
 
-        const active = data.active !== false;
+        // The fixed Super Admin UID is a permanent trusted exception.
+        const isFixedSuperAdmin = document.id === SUPER_ADMIN_UID;
+
+        const active =
+            isFixedSuperAdmin || data.active === true;
+
+        const role = normalize(data.role);
+
+        const isSuperAdmin =
+            isFixedSuperAdmin ||
+            role === "super admin" ||
+            role === "superadmin";
+
+        const isAdmin = role === "admin";
 
         const user = {
             uid: document.id,
             name: String(data.name || data.displayName || ""),
             email,
             role: String(data.role || ""),
+            normalizedRole: role,
             active,
+            isSuperAdmin,
         };
 
         usersByUid.set(document.id, user);
 
-        const role = normalize(data.role);
-
-        const isSuperAdmin =
-            document.id === SUPER_ADMIN_UID ||
-            role === "super admin" ||
-            role === "superadmin";
-
-        if (active && isSuperAdmin && isValidEmail(email)) {
-            superAdmins.push(user);
+        if (active && isValidEmail(email)) {
+            if (isSuperAdmin) {
+                superAdmins.push(user);
+            } else if (isAdmin) {
+                admins.push(user);
+            }
         }
     }
 
-    return { usersByUid, superAdmins };
+    return {
+        usersByUid,
+        superAdmins,
+        admins,
+    };
 }
+
+// --------------------------------------------------
+// READ EXPIRY RECORDS
+// --------------------------------------------------
 
 async function readModuleRecords(config, today, reminderDays) {
     const snapshot = await db
@@ -339,11 +401,17 @@ async function readModuleRecords(config, today, reminderDays) {
             continue;
         }
 
-        const expiryDate = toDateString(
-            firstValue(data, config.expiryFields)
+        const expiryDate = firstValidDate(
+            data,
+            config.expiryFields
         );
 
-        if (!expiryDate) continue;
+        if (!expiryDate) {
+            console.log(
+                `Skipped ${config.name} record ${document.id}: no valid expiry date.`
+            );
+            continue;
+        }
 
         const daysLeft = daysBetween(today, expiryDate);
 
@@ -402,6 +470,10 @@ async function getAllExpiryRecords(today, reminderDays) {
         .sort((a, b) => a.daysLeft - b.daysLeft);
 }
 
+// --------------------------------------------------
+// EMAIL CONTENT
+// --------------------------------------------------
+
 function getReminderLabel(record) {
     if (record.daysLeft < 0) {
         return `OVERDUE by ${Math.abs(record.daysLeft)} day(s)`;
@@ -420,7 +492,7 @@ function buildEmailHtml(records, today, isTest) {
             <td>${escapeHtml(record.module)}</td>
             <td>${escapeHtml(record.title)}</td>
             <td>${escapeHtml(record.company)}</td>
-            <td>${displayDate(record.expiryDate)}</td>
+            <td>${escapeHtml(displayDate(record.expiryDate))}</td>
             <td>${escapeHtml(getReminderLabel(record))}</td>
         </tr>
     `).join("");
@@ -435,7 +507,7 @@ function buildEmailHtml(records, today, isTest) {
             : ""
         }
 
-            <p>Date: ${displayDate(today)}</p>
+            <p>Date: ${escapeHtml(displayDate(today))}</p>
 
             <p>
                 ${records.length
@@ -446,20 +518,20 @@ function buildEmailHtml(records, today, isTest) {
 
             ${records.length
             ? `
-                        <table cellpadding="8" cellspacing="0" border="1"
-                            style="border-collapse:collapse;width:100%">
-                            <thead>
-                                <tr>
-                                    <th>Module</th>
-                                    <th>Record</th>
-                                    <th>Company / Vendor</th>
-                                    <th>Expiry Date</th>
-                                    <th>Reminder</th>
-                                </tr>
-                            </thead>
-                            <tbody>${rows}</tbody>
-                        </table>
-                    `
+                <table cellpadding="8" cellspacing="0" border="1"
+                    style="border-collapse:collapse;width:100%">
+                    <thead>
+                        <tr>
+                            <th>Module</th>
+                            <th>Record</th>
+                            <th>Company / Vendor</th>
+                            <th>Expiry Date</th>
+                            <th>Reminder</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            `
             : ""
         }
 
@@ -467,6 +539,10 @@ function buildEmailHtml(records, today, isTest) {
         </div>
     `;
 }
+
+// --------------------------------------------------
+// DUPLICATE EMAIL PREVENTION
+// --------------------------------------------------
 
 function getSendLogId(date, email) {
     return crypto
@@ -477,6 +553,7 @@ function getSendLogId(date, email) {
 
 async function claimDailySend(date, email, records) {
     const logId = getSendLogId(date, email);
+
     const logRef = db
         .collection("email_reminder_logs")
         .doc(logId);
@@ -487,21 +564,16 @@ async function claimDailySend(date, email, records) {
         if (snapshot.exists) {
             const existing = snapshot.data();
 
-            if (existing.status === "sent") {
-                return { allowed: false, logRef };
-            }
-
-            if (existing.status === "sending" && existing.updatedAt) {
-                const updatedAt = existing.updatedAt.toDate
-                    ? existing.updatedAt.toDate()
-                    : new Date(existing.updatedAt);
-
-                const ageMinutes =
-                    (Date.now() - updatedAt.getTime()) / 60000;
-
-                if (ageMinutes < 30) {
-                    return { allowed: false, logRef };
-                }
+            // Never automatically resend a previously accepted email.
+            if (
+                existing.status === "sent" ||
+                existing.status === "sending"
+            ) {
+                return {
+                    allowed: false,
+                    logRef,
+                    status: existing.status,
+                };
             }
         }
 
@@ -518,7 +590,11 @@ async function claimDailySend(date, email, records) {
             { merge: true }
         );
 
-        return { allowed: true, logRef };
+        return {
+            allowed: true,
+            logRef,
+            status: "sending",
+        };
     });
 }
 
@@ -527,7 +603,7 @@ async function sendOneEmail(email, records, today, isTest) {
 
     if (!claim.allowed) {
         console.log(
-            `Skipped already-sent or in-progress email for ${email}.`
+            `Skipped email for ${email}. Existing log status: ${claim.status}.`
         );
         return false;
     }
@@ -536,22 +612,37 @@ async function sendOneEmail(email, records, today, isTest) {
         ? `TEST — Expiry Reminder (${today})`
         : `Expiry Reminder: ${records.length} record(s) require attention`;
 
+    // Send first. If Resend accepts the email, do not mark it failed
+    // merely because the subsequent Firestore update fails.
+    let resendResult;
+
     try {
-        const { error } = await resend.emails.send({
+        resendResult = await resend.emails.send({
             from: EMAIL_FROM,
             to: [email],
             subject,
             html: buildEmailHtml(records, today, isTest),
         });
+    } catch (error) {
+        await markEmailFailed(claim.logRef, error);
+        return false;
+    }
 
-        if (error) {
-            throw new Error(
-                error.message || "Resend rejected the email."
-            );
-        }
+    if (resendResult?.error) {
+        await markEmailFailed(
+            claim.logRef,
+            new Error(
+                resendResult.error.message ||
+                "Resend rejected the email."
+            )
+        );
+        return false;
+    }
 
+    try {
         await claim.logRef.update({
             status: "sent",
+            resendId: resendResult?.data?.id || null,
             sentAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
@@ -559,25 +650,45 @@ async function sendOneEmail(email, records, today, isTest) {
         console.log(`Email accepted by Resend for ${email}.`);
         return true;
     } catch (error) {
-        await claim.logRef.set(
-            {
-                status: "failed",
-                error: String(
-                    error.message || "Email send failed"
-                ).slice(0, 500),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
-
+        // Keep status as sending. A retry must not automatically
+        // send a second copy when Resend may already have accepted it.
         console.error(
-            `Email failed for ${email}:`,
+            `Email was accepted by Resend for ${email}, but the Firestore sent-log update failed. Manual log inspection is required:`,
             error.message
         );
 
         return false;
     }
 }
+
+async function markEmailFailed(logRef, error) {
+    try {
+        await logRef.set(
+            {
+                status: "failed",
+                error: String(
+                    error?.message || "Email send failed"
+                ).slice(0, 500),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    } catch (logError) {
+        console.error(
+            "Could not update failed email log:",
+            logError.message
+        );
+    }
+
+    console.error(
+        "Email send failed:",
+        error?.message || error
+    );
+}
+
+// --------------------------------------------------
+// RECIPIENT HELPERS
+// --------------------------------------------------
 
 function addRecordToRecipient(recipientMap, email, record) {
     const normalizedEmail = String(email || "")
@@ -600,7 +711,12 @@ function addRecordToRecipient(recipientMap, email, record) {
     }
 }
 
-async function logMissingModuleOperators(date, moduleName, records, reason) {
+async function logMissingModuleOperators(
+    date,
+    moduleName,
+    records,
+    reason
+) {
     const id = crypto
         .createHash("sha256")
         .update(`${date}_${moduleName}_${reason}`)
@@ -614,20 +730,27 @@ async function logMissingModuleOperators(date, moduleName, records, reason) {
             recordIds: records.map((record) => record.id),
             recordCount: records.length,
             status: "no_operator",
+            fallback: "Super Admin",
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
     );
 }
 
+// --------------------------------------------------
+// PRODUCTION EMAIL ROUTING
+// --------------------------------------------------
+
 async function buildProductionRecipients(
     records,
     settings,
     usersByUid,
     superAdmins,
+    admins,
     today
 ) {
     const recipientMap = new Map();
+
     const operatorsByModule =
         settings.moduleOperators &&
             typeof settings.moduleOperators === "object"
@@ -653,6 +776,7 @@ async function buildProductionRecipients(
                 (user) =>
                     user &&
                     user.active &&
+                    user.normalizedRole === "editor" &&
                     isValidEmail(user.email)
             );
 
@@ -662,23 +786,45 @@ async function buildProductionRecipients(
                 config.name,
                 moduleRecords,
                 configuredUids.length
-                    ? "No configured operator is currently active with a valid email."
-                    : "No module operator has been configured."
+                    ? "No configured active Editor with a valid email."
+                    : "No module Editor has been configured."
             );
         }
 
         for (const record of moduleRecords) {
-            for (const operator of activeOperators) {
-                addRecordToRecipient(
-                    recipientMap,
-                    operator.email,
-                    record
-                );
+            const isOverdue = record.daysLeft < 0;
+
+            if (activeOperators.length) {
+                // Upcoming, expiry-day and overdue -> assigned Editors.
+                for (const operator of activeOperators) {
+                    addRecordToRecipient(
+                        recipientMap,
+                        operator.email,
+                        record
+                    );
+                }
+            } else {
+                // No valid Editor -> Super Admin fallback.
+                for (const superAdmin of superAdmins) {
+                    addRecordToRecipient(
+                        recipientMap,
+                        superAdmin.email,
+                        record
+                    );
+                }
             }
 
-            // Overdue reminders go to the same module operators
-            // and additionally to all active Super Admins.
-            if (record.daysLeft < 0) {
+            if (isOverdue) {
+                // Overdue -> all active Admins.
+                for (const adminUser of admins) {
+                    addRecordToRecipient(
+                        recipientMap,
+                        adminUser.email,
+                        record
+                    );
+                }
+
+                // Overdue -> all active Super Admins.
                 for (const superAdmin of superAdmins) {
                     addRecordToRecipient(
                         recipientMap,
@@ -693,10 +839,15 @@ async function buildProductionRecipients(
     return recipientMap;
 }
 
+// --------------------------------------------------
+// MAIN
+// --------------------------------------------------
+
 async function main() {
     const today = getTodayInIndia();
 
     const settings = await getReminderSettings();
+
     const reminderDays = getReminderDays(settings);
     const emailTime = getEmailTime(settings);
 
@@ -717,7 +868,9 @@ async function main() {
         return;
     }
 
-    console.log("Configured email time reached. Checking expiry records...");
+    console.log(
+        "Configured email time reached. Checking expiry records..."
+    );
 
     const records = await getAllExpiryRecords(
         today,
@@ -726,7 +879,8 @@ async function main() {
 
     console.log(`Due records found: ${records.length}`);
 
-    if (TEST_MODE) {
+    // SAFE TEST MODE: never sends to actual users.
+    if (TEST_MODE && !ROUTING_DRY_RUN) {
         console.log(
             "SAFE TEST MODE is ON. All due records will go only to TEST_EMAIL."
         );
@@ -748,20 +902,54 @@ async function main() {
         return;
     }
 
-    const { usersByUid, superAdmins } =
-        await getUserDirectory();
+    const {
+        usersByUid,
+        superAdmins,
+        admins,
+    } = await getUserDirectory();
+
+    console.log("\n========== ROUTING PREVIEW ==========");
+
+    const preview = await buildProductionRecipients(
+        records,
+        settings,
+        usersByUid,
+        superAdmins,
+        admins,
+        today
+    );
+
+    for (const [email, recipientRecords] of preview.entries()) {
+        console.log(`Recipient: ${email}`);
+        console.log(
+            "Records:",
+            recipientRecords.map(
+                (record) => `${record.module}: ${record.title}`
+            ).join(", ")
+        );
+    }
+
+    console.log("========== END ROUTING PREVIEW ==========\n");
+    if (ROUTING_DRY_RUN) {
+        console.log("ROUTING DRY RUN COMPLETE. No emails were sent.");
+        return;
+    }
+    console.log(
+        `Active Super Admins: ${superAdmins.length}; active Admins: ${admins.length}`
+    );
 
     const recipientMap = await buildProductionRecipients(
         records,
         settings,
         usersByUid,
         superAdmins,
+        admins,
         today
     );
 
     if (!recipientMap.size) {
         console.log(
-            "No eligible recipients for today's reminders. Check reminder_routing_logs for unassigned modules."
+            "No eligible recipients for today's reminders. Check reminder_routing_logs and user/module operator settings."
         );
         return;
     }

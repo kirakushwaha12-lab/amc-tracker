@@ -35,3 +35,4 @@ jobs:
           TEST_MODE: ${{ secrets.TEST_MODE }}
           TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
           FORCE_TEST_EMAIL: ${{ secrets.FORCE_TEST_EMAIL }}
+          ROUTING_DRY_RUN: "true"
