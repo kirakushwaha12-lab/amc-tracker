@@ -13,11 +13,24 @@ import {
     getDoc,
     updateDoc,
     deleteDoc,
+    deleteField,
 } from "firebase/firestore";
+import imageCompression from "browser-image-compression";
 import { auth, db } from "../../../lib/firebase";
 
-const BLUE = "#2563eb";
+const BLUE = "#0b4da2";
 const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
+const MAX_DOCUMENT_SIZE = 500 * 1024;
+
+const ALLOWED_DOCUMENT_TYPES = [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
+
+const ALLOWED_DOCUMENT_EXTENSIONS = ["pdf", "jpg", "jpeg", "png", "doc", "docx"];
 
 const initialForm = {
     examinationType: "",
@@ -58,6 +71,105 @@ function getStatus(record) {
     return "Active";
 }
 
+function getDocumentExtension(fileName = "") {
+    return fileName.split(".").pop()?.toLowerCase() || "";
+}
+
+async function compressImageIfNeeded(file) {
+    const extension = getDocumentExtension(file.name);
+    const isImage =
+        ["jpg", "jpeg", "png"].includes(extension) ||
+        ["image/jpeg", "image/png"].includes(file.type);
+
+    if (!isImage || file.size <= 100 * 1024) {
+        return file;
+    }
+
+    try {
+        const compressedFile = await imageCompression(file, {
+            maxSizeMB: 0.2,
+            maxWidthOrHeight: 1600,
+            useWebWorker: true,
+            fileType: file.type || undefined,
+        });
+
+        if (compressedFile.size >= file.size) {
+            return file;
+        }
+
+        return new File([compressedFile], file.name, {
+            type: compressedFile.type || file.type,
+            lastModified: Date.now(),
+        });
+    } catch (error) {
+        console.error("Compliance document compression error:", error);
+        throw new Error(
+            "Photo compression failed. Please choose another photo."
+        );
+    }
+}
+
+function readDocumentAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => {
+            if (typeof reader.result === "string") {
+                resolve(reader.result);
+            } else {
+                reject(new Error("The document could not be read."));
+            }
+        };
+
+        reader.onerror = () => {
+            reject(new Error("The document could not be read."));
+        };
+
+        reader.readAsDataURL(file);
+    });
+}
+
+async function openSavedDocument(dataUrl) {
+    let documentTab = null;
+    let objectUrl = null;
+
+    try {
+        documentTab = window.open("", "_blank");
+
+        if (!documentTab) {
+            alert("Please allow pop-ups to view the document.");
+            return;
+        }
+
+        const response = await fetch(dataUrl);
+
+        if (!response.ok) {
+            throw new Error("Could not load the saved document.");
+        }
+
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        documentTab.location.href = objectUrl;
+
+        window.setTimeout(() => {
+            URL.revokeObjectURL(objectUrl);
+        }, 60000);
+    } catch (error) {
+        console.error("Compliance document open error:", error);
+
+        if (documentTab && !documentTab.closed) {
+            documentTab.close();
+        }
+
+        alert("Document could not be opened. Please try again.");
+    }
+}
+
+function formatDocumentSize(size) {
+    if (!size) return "Size unavailable";
+    return `${(size / 1024).toFixed(1)} KB`;
+}
+
 function SummaryCard({ title, count, detail, color }) {
     return (
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -81,9 +193,8 @@ function StatusBadge({ status }) {
 
     return (
         <span
-            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${
-                styles[status] || styles.Unknown
-            }`}
+            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${styles[status] || styles.Unknown
+                }`}
         >
             {status}
         </span>
@@ -109,6 +220,9 @@ export default function CompliancePage() {
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
+
+    const [selectedDocument, setSelectedDocument] = useState(null);
+    const [existingDocument, setExistingDocument] = useState(null);
 
     useEffect(() => {
         let unsubscribeRecords;
@@ -140,7 +254,7 @@ export default function CompliancePage() {
 
                 if (cancelled) return;
 
-                if (!protectedSuperAdmin && userData.active === false) {
+                if (!protectedSuperAdmin && userData.active !== true) {
                     setRecords([]);
                     setLoading(false);
                     setCanEditRecords(false);
@@ -172,31 +286,38 @@ export default function CompliancePage() {
                     (snapshot) => {
                         if (cancelled) return;
 
-                        setRecords(
-                            snapshot.docs.map((item) => {
-                                const data = item.data();
+                        const complianceRecords = snapshot.docs.map((item) => {
+                            const data = item.data();
 
-                                return {
-                                    id: item.id,
-                                    ...data,
-                                    examinationType:
-                                        data.examinationType ??
-                                        data.typeOfExamination ??
-                                        data.name ??
-                                        "",
-                                    unit: data.unit ?? "",
-                                    examinationDate:
-                                        data.examinationDate ??
-                                        data.lastExaminationDate ??
-                                        "",
-                                    validTill:
-                                        data.validTill ??
-                                        data.validTillDate ??
-                                        data.expiryDate ??
-                                        "",
-                                };
-                            })
-                        );
+                            return {
+                                id: item.id,
+                                ...data,
+                                examinationType:
+                                    data.examinationType ??
+                                    data.typeOfExamination ??
+                                    data.name ??
+                                    "",
+                                unit: data.unit ?? "",
+                                examinationDate:
+                                    data.examinationDate ??
+                                    data.lastExaminationDate ??
+                                    "",
+                                validTill:
+                                    data.validTill ??
+                                    data.validTillDate ??
+                                    data.expiryDate ??
+                                    "",
+                            };
+                        });
+
+                        complianceRecords.sort((a, b) => {
+                            const dateA = a.validTill || "9999-12-31";
+                            const dateB = b.validTill || "9999-12-31";
+
+                            return dateA.localeCompare(dateB);
+                        });
+
+                        setRecords(complianceRecords);
 
                         setError("");
                         setLoading(false);
@@ -257,9 +378,17 @@ export default function CompliancePage() {
 
             const days = Math.ceil((expiry - today) / 86400000);
 
-            if (days < 0) overdue++;
-            else if (days <= 10) next10++;
-            else if (days <= 30) next30++;
+            if (days < 0) {
+                overdue++;
+            } else {
+                if (days <= 10) {
+                    next10++;
+                }
+
+                if (days <= 30) {
+                    next30++;
+                }
+            }
         });
 
         return { overdue, next10, next30 };
@@ -315,6 +444,11 @@ export default function CompliancePage() {
         setForm((current) => ({ ...current, [name]: value }));
     }
 
+    function resetDocumentState() {
+        setSelectedDocument(null);
+        setExistingDocument(null);
+    }
+
     function openAddForm() {
         if (!canEditRecords) {
             setError("You have view-only access to Compliance records.");
@@ -326,6 +460,7 @@ export default function CompliancePage() {
         setFormError("");
         setError("");
         setNotice("");
+        resetDocumentState();
         setShowForm(true);
     }
 
@@ -342,10 +477,75 @@ export default function CompliancePage() {
             examinationDate: record.examinationDate ?? "",
             validTill: record.validTill ?? "",
         });
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    name: record.documentName || "Saved document",
+                    data: record.documentData,
+                    size: record.documentSize || 0,
+                    type: record.documentType || "",
+                }
+                : null
+        );
+
+        setSelectedDocument(null);
         setFormError("");
         setError("");
         setNotice("");
         setShowForm(true);
+    }
+
+    async function handleDocumentChange(event) {
+        const input = event.target;
+        const file = input.files?.[0];
+
+        setFormError("");
+
+        if (!file) return;
+
+        const extension = getDocumentExtension(file.name);
+        const isAllowed =
+            ALLOWED_DOCUMENT_TYPES.includes(file.type) ||
+            ALLOWED_DOCUMENT_EXTENSIONS.includes(extension);
+
+        if (!isAllowed) {
+            setFormError(
+                "Only PDF, JPG, PNG, DOC and DOCX documents are allowed."
+            );
+            input.value = "";
+            return;
+        }
+
+        const isImage =
+            ["image/jpeg", "image/png"].includes(file.type) ||
+            ["jpg", "jpeg", "png"].includes(extension);
+
+        if (!isImage && file.size > MAX_DOCUMENT_SIZE) {
+            setFormError("PDF and Word documents must be 500 KB or less.");
+            input.value = "";
+            return;
+        }
+
+        try {
+            const finalFile = await compressImageIfNeeded(file);
+
+            if (finalFile.size > MAX_DOCUMENT_SIZE) {
+                setFormError(
+                    "Document is still over 500 KB after compression. Please choose a smaller file."
+                );
+                input.value = "";
+                return;
+            }
+
+            setSelectedDocument(finalFile);
+        } catch (err) {
+            setFormError(
+                err.message ||
+                "Document processing failed. Please try another file."
+            );
+            input.value = "";
+        }
     }
 
     async function handleSubmit(event) {
@@ -354,7 +554,6 @@ export default function CompliancePage() {
         setNotice("");
 
         if (!canEditRecords) {
-            setShowForm(false);
             setFormError("You do not have permission to add or edit records.");
             return;
         }
@@ -387,29 +586,73 @@ export default function CompliancePage() {
                 updatedAt: serverTimestamp(),
             };
 
+            let documentFields = {};
+
+            if (selectedDocument) {
+                const documentData = await readDocumentAsDataUrl(
+                    selectedDocument
+                );
+
+                documentFields = {
+                    documentData,
+                    documentName: selectedDocument.name,
+                    documentSize: selectedDocument.size,
+                    documentType:
+                        selectedDocument.type ||
+                        (getDocumentExtension(selectedDocument.name) === "pdf"
+                            ? "application/pdf"
+                            : ""),
+                };
+            } else if (existingDocument?.data) {
+                documentFields = {
+                    documentData: existingDocument.data,
+                    documentName: existingDocument.name,
+                    documentSize: existingDocument.size || 0,
+                    documentType: existingDocument.type || "",
+                };
+            } else if (editingId) {
+                documentFields = {
+                    documentData: deleteField(),
+                    documentName: deleteField(),
+                    documentSize: deleteField(),
+                    documentType: deleteField(),
+                };
+            }
+
             if (editingId) {
                 await updateDoc(
                     doc(db, "compliance_records", editingId),
-                    recordData
+                    {
+                        ...recordData,
+                        ...documentFields,
+                    }
                 );
+
                 setNotice("Compliance record updated successfully.");
             } else {
                 await addDoc(collection(db, "compliance_records"), {
                     ...recordData,
+                    ...documentFields,
                     createdAt: serverTimestamp(),
                 });
+
                 setNotice("Compliance record added successfully.");
             }
 
             setForm({ ...initialForm });
             setEditingId(null);
             setShowForm(false);
+            setFormError("");
+            resetDocumentState();
         } catch (err) {
             console.error("Compliance save error:", err);
+
             setFormError(
                 err.code === "permission-denied"
                     ? "Permission denied. Please check Firestore security rules."
-                    : "Record could not be saved. Please try again."
+                    : err.code === "resource-exhausted"
+                        ? "The document or record is too large for Firestore. Please choose a smaller document."
+                        : "Record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -437,6 +680,7 @@ export default function CompliancePage() {
             setNotice("Compliance record deleted successfully.");
         } catch (err) {
             console.error("Compliance delete error:", err);
+
             setError(
                 err.code === "permission-denied"
                     ? "Permission denied. Check Firestore security rules."
@@ -663,6 +907,16 @@ export default function CompliancePage() {
                                                             </button>
                                                         )}
 
+                                                        {record.documentData && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openSavedDocument(record.documentData)}
+                                                                className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                                                            >
+                                                                View Doc
+                                                            </button>
+                                                        )}
+
                                                         {isSuperAdmin && (
                                                             <button
                                                                 type="button"
@@ -714,8 +968,8 @@ export default function CompliancePage() {
 
                 {showForm && canEditRecords && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/50 p-4">
-                        <div className="my-auto w-full max-w-2xl rounded-2xl bg-white shadow-xl">
-                            <div className="flex items-center justify-between border-b border-slate-200 p-5">
+                        <div className="my-auto max-h-[94vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+                            <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white p-5">
                                 <div>
                                     <h2 className="text-xl font-bold text-slate-900">
                                         {editingId
@@ -733,6 +987,7 @@ export default function CompliancePage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        resetDocumentState();
                                     }}
                                     className="rounded-lg px-3 py-2 text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
                                 >
@@ -796,6 +1051,102 @@ export default function CompliancePage() {
                                         />
                                     </div>
 
+                                    <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 sm:col-span-2">
+                                        <label className="block text-sm font-semibold text-slate-800">
+                                            Compliance Document{" "}
+                                            <span className="ml-2 font-normal text-slate-500">
+                                                (Optional)
+                                            </span>
+                                        </label>
+
+                                        <p className="mt-1 text-xs text-slate-500">
+                                            PDF, JPG, PNG, DOC or DOCX · Maximum 500 KB
+                                        </p>
+
+                                        {existingDocument && (
+                                            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
+                                                <span className="min-w-0 flex-1 break-all text-sm text-slate-700">
+                                                    {selectedDocument
+                                                        ? selectedDocument.name
+                                                        : existingDocument.name}
+                                                </span>
+
+                                                {!selectedDocument && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            openSavedDocument(existingDocument.data)
+                                                        }
+                                                        className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                                    >
+                                                        View
+                                                    </button>
+                                                )}
+
+                                                <label
+                                                    className="inline-flex cursor-pointer items-center rounded-lg px-3 py-2 text-xs font-semibold text-white transition hover:opacity-90"
+                                                    style={{ backgroundColor: BLUE }}
+                                                >
+                                                    Replace
+                                                    <input
+                                                        type="file"
+                                                        accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                                        onChange={handleDocumentChange}
+                                                        className="sr-only"
+                                                    />
+                                                </label>
+
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setExistingDocument(null);
+                                                        setSelectedDocument(null);
+                                                    }}
+                                                    className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
+                                                >
+                                                    Remove
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {!existingDocument && (
+                                            <label className="mt-3 flex w-full cursor-pointer items-center gap-3 rounded-lg border border-blue-200 bg-white p-3 transition hover:border-blue-400 hover:bg-blue-50">
+                                                <span
+                                                    className="inline-flex shrink-0 items-center rounded-lg px-4 py-2 text-sm font-semibold text-white"
+                                                    style={{ backgroundColor: BLUE }}
+                                                >
+                                                    Choose Document
+                                                </span>
+
+                                                <span className="min-w-0 flex-1 break-all text-sm text-slate-500">
+                                                    {selectedDocument
+                                                        ? selectedDocument.name
+                                                        : "No file chosen"}
+                                                </span>
+
+                                                <input
+                                                    type="file"
+                                                    accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                                    onChange={handleDocumentChange}
+                                                    className="sr-only"
+                                                />
+                                            </label>
+                                        )}
+
+                                        {selectedDocument && (
+                                            <p className="mt-2 break-all text-xs text-emerald-700">
+                                                Selected: {selectedDocument.name} (
+                                                {formatDocumentSize(selectedDocument.size)})
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    <div className="sm:col-span-2">
+                                        <p className="text-xs text-slate-500">
+                                            Images larger than 100 KB are compressed before saving.
+                                        </p>
+                                    </div>
+
                                     {formError && (
                                         <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">
                                             {formError}
@@ -810,6 +1161,7 @@ export default function CompliancePage() {
                                         onClick={() => {
                                             setShowForm(false);
                                             setFormError("");
+                                            resetDocumentState();
                                         }}
                                         className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                                     >

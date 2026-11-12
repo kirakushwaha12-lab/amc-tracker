@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -52,8 +53,9 @@ function getRole(value) {
 
     if (normalized === "admin") return "Admin";
     if (normalized === "editor") return "Editor";
+    if (normalized === "viewer") return "Viewer";
 
-    return "Viewer";
+    return "Invalid Role";
 }
 
 export default function UsersPage() {
@@ -79,33 +81,56 @@ export default function UsersPage() {
     useEffect(() => {
         let unsubscribeUsers;
         let cancelled = false;
+        let authCheckId = 0;
 
         const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+            const currentCheckId = ++authCheckId;
+
             unsubscribeUsers?.();
             unsubscribeUsers = undefined;
 
+            setUsers([]);
+            setCurrentRole("");
+            setError("");
+            setSuccess("");
+            setLoading(true);
+
             if (!user) {
+                setLoading(false);
                 router.replace("/");
                 return;
             }
 
-            setLoading(true);
-            setError("");
-
             try {
                 const profile = await getDoc(doc(db, "users", user.uid));
 
-                if (cancelled) return;
+                if (
+                    cancelled ||
+                    currentCheckId !== authCheckId
+                ) {
+                    return;
+                }
 
-                const profileData = profile.exists() ? profile.data() : {};
+                if (!profile.exists()) {
+                    setError(
+                        "Your user profile was not found. Please contact the Super Admin."
+                    );
+                    setLoading(false);
+                    return;
+                }
+
+                const profileData = profile.data();
                 const role = profileData.role || "";
 
-                setCurrentRole(role);
+                if (profileData.active !== true) {
+                    setError(
+                        "Your account is inactive. Please contact the Super Admin."
+                    );
+                    setLoading(false);
+                    return;
+                }
 
-                if (
-                    profileData.active === false ||
-                    !canAccessUsers(role)
-                ) {
+                if (!canAccessUsers(role)) {
                     setError(
                         "Only an active Admin or Super Admin can access user management."
                     );
@@ -113,10 +138,17 @@ export default function UsersPage() {
                     return;
                 }
 
+                setCurrentRole(role);
+
                 unsubscribeUsers = onSnapshot(
                     collection(db, "users"),
                     (snapshot) => {
-                        if (cancelled) return;
+                        if (
+                            cancelled ||
+                            currentCheckId !== authCheckId
+                        ) {
+                            return;
+                        }
 
                         const list = snapshot.docs.map((item) => {
                             const data = item.data();
@@ -128,9 +160,9 @@ export default function UsersPage() {
                                 department: data.department || "—",
                                 role: getRole(data.role),
                                 status:
-                                    data.active === false
-                                        ? "Inactive"
-                                        : "Active",
+                                    data.active === true
+                                        ? "Active"
+                                        : "Inactive",
                             };
                         });
 
@@ -144,6 +176,13 @@ export default function UsersPage() {
                     (err) => {
                         console.error("Users loading error:", err);
 
+                        if (
+                            cancelled ||
+                            currentCheckId !== authCheckId
+                        ) {
+                            return;
+                        }
+
                         setError(
                             "Users could not be loaded. Check Firestore security rules."
                         );
@@ -154,7 +193,10 @@ export default function UsersPage() {
             } catch (err) {
                 console.error("User permission check failed:", err);
 
-                if (!cancelled) {
+                if (
+                    !cancelled &&
+                    currentCheckId === authCheckId
+                ) {
                     setError(
                         "Unable to verify user access. Check Firestore permissions."
                     );
@@ -165,6 +207,8 @@ export default function UsersPage() {
 
         return () => {
             cancelled = true;
+            authCheckId++;
+
             unsubscribeAuth();
             unsubscribeUsers?.();
         };
@@ -276,6 +320,13 @@ export default function UsersPage() {
                         "Could not roll back new Auth account:",
                         cleanupError
                     );
+
+                    setError(
+                        "User profile creation failed, and automatic Auth cleanup also failed. Please check Firebase Authentication and remove the incomplete account if necessary."
+                    );
+
+                    setSaving(false);
+                    return;
                 }
             }
 
@@ -519,12 +570,13 @@ export default function UsersPage() {
                         </p>
                     </div>
 
-
                     <div className="flex flex-wrap gap-3">
                         {superAdmin && (
                             <button
                                 type="button"
-                                onClick={() => router.push("/dashboard/reminder-settings")}
+                                onClick={() =>
+                                    router.push("/dashboard/reminder-settings")
+                                }
                                 className="rounded-xl border border-blue-700 px-5 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50"
                             >
                                 Expiry Reminder Settings
@@ -538,12 +590,12 @@ export default function UsersPage() {
                                 setError("");
                                 setSuccess("");
                             }}
-                            className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
+                            className="rounded-xl px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                            style={{ backgroundColor: "#0b4da2" }}
                         >
                             {showForm ? "Cancel" : "+ Add User"}
                         </button>
                     </div>
-
                 </div>
 
                 {admin && (
@@ -659,7 +711,8 @@ export default function UsersPage() {
                                 <button
                                     type="submit"
                                     disabled={saving}
-                                    className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                                    className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                                    style={{ backgroundColor: "#0b4da2" }}
                                 >
                                     {saving ? "Creating User..." : "Create User"}
                                 </button>
@@ -743,6 +796,10 @@ export default function UsersPage() {
                                                     <span className="inline-flex rounded-full bg-purple-50 px-3 py-1 text-xs font-semibold text-purple-700">
                                                         Super Admin
                                                     </span>
+                                                ) : item.role === "Invalid Role" ? (
+                                                    <span className="inline-flex rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">
+                                                        Invalid Role
+                                                    </span>
                                                 ) : (
                                                     <span className="text-sm font-medium text-slate-700">
                                                         {item.role}
@@ -753,8 +810,8 @@ export default function UsersPage() {
                                             <td className="px-5 py-4">
                                                 <span
                                                     className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${item.status === "Active"
-                                                            ? "bg-emerald-50 text-emerald-700"
-                                                            : "bg-red-50 text-red-700"
+                                                        ? "bg-emerald-50 text-emerald-700"
+                                                        : "bg-red-50 text-red-700"
                                                         }`}
                                                 >
                                                     {item.status}
@@ -773,7 +830,11 @@ export default function UsersPage() {
                                                 ) : (
                                                     <div className="flex items-center gap-2">
                                                         <select
-                                                            value={item.role}
+                                                            value={
+                                                                item.role === "Invalid Role"
+                                                                    ? ""
+                                                                    : item.role
+                                                            }
                                                             disabled={isUpdating}
                                                             onChange={(event) =>
                                                                 handleRoleChange(
@@ -784,6 +845,11 @@ export default function UsersPage() {
                                                             className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
                                                             aria-label={`Change role for ${item.name}`}
                                                         >
+                                                            {item.role === "Invalid Role" && (
+                                                                <option value="" disabled>
+                                                                    Invalid Role
+                                                                </option>
+                                                            )}
                                                             <option value="Viewer">
                                                                 Viewer
                                                             </option>
@@ -802,8 +868,8 @@ export default function UsersPage() {
                                                                 handleStatusToggle(item)
                                                             }
                                                             className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${item.status === "Active"
-                                                                    ? "border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
-                                                                    : "border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                                                ? "border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                                                                : "border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                                                                 }`}
                                                         >
                                                             {isUpdating

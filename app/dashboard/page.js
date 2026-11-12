@@ -1,8 +1,6 @@
 
 "use client";
-
-import { useMemo } from "react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDashboardShell } from "./layout";
 
 function toDate(value) {
@@ -16,42 +14,69 @@ function toDate(value) {
         return Number.isNaN(value.getTime()) ? null : value;
     }
 
-    if (typeof value === "string" || typeof value === "number") {
+    if (typeof value === "string") {
+        const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+        if (match) {
+            const [, year, month, day] = match;
+            return new Date(Number(year), Number(month) - 1, Number(day));
+        }
+
         const parsed = new Date(value);
         return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof value === "number") {
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof value === "object" && Number.isFinite(value.seconds)) {
+        return new Date(value.seconds * 1000);
     }
 
     return null;
 }
 
+function getModule(record) {
+    if (record._source === "compliance_records") {
+        return "Compliance";
+    }
+
+    if (record._source === "vehicles") {
+        const type = String(record.type || record.category || "").toLowerCase();
+        return type.includes("pollution") ? "Pollution" : "Insurance";
+    }
+
+    const type = String(record.type || record.category || "").toLowerCase();
+
+    if (type.includes("warranty")) return "Warranty";
+    if (type.includes("software")) return "Software License";
+    if (type.includes("amc")) return "AMC";
+
+    return "IT Devices";
+}
+
 function getExpiryDate(record) {
-    const fields =
-        record._source === "compliance_records"
-            ? [
-                "expiryDate",
-                "endDate",
-                "validTill",
-                "validUntil",
-                "validTillDate",
-                "renewalDate",
-                "date",
-            ]
-            : record._source === "vehicles"
-                ? [
-                    "expiryDate",
-                    "renewalDate",
-                    "endDate",
-                    "date",
-                    "pollutionExpiryDate",
-                ]
-                : [
-                    "endDate",
-                    "expiryDate",
-                    "warrantyExpiry",
-                    "warrantyExpired",
-                    "renewalDate",
-                    "date",
-                ];
+    const module = getModule(record);
+
+    let fields;
+
+    if (module === "Insurance") {
+        fields = ["expiryDate"];
+    } else if (module === "Pollution") {
+        fields = ["expiryDate", "pollutionExpiryDate"];
+    } else if (module === "Compliance") {
+        fields = ["validTill", "validUntil", "validTillDate", "expiryDate", "endDate"];
+    } else if (module === "AMC") {
+        fields = ["endDate"];
+    } else if (module === "Warranty") {
+        fields = ["warrantyExpiry", "warrantyExpired", "endDate", "expiryDate"];
+    } else if (module === "Software License") {
+        fields = ["expiryDate"];
+    } else {
+        fields = ["endDate", "expiryDate"];
+    }
 
     for (const field of fields) {
         const parsed = toDate(record[field]);
@@ -61,14 +86,13 @@ function getExpiryDate(record) {
     return null;
 }
 
-
 function getStartDate(record) {
     const module = getModule(record);
 
     const fields =
         module === "Pollution"
-            ? ["certificateDate", "startDate", "periodDate"]
-            : record._source === "compliance_records"
+            ? ["certificateDate", "startDate"]
+            : module === "Compliance"
                 ? ["examinationDate", "startDate", "periodDate"]
                 : ["startDate", "periodDate", "purchaseDate"];
 
@@ -101,8 +125,10 @@ function getProductName(record) {
         record.product ||
         record.item ||
         record.vehicleNo ||
+        record.vehicleNumber ||
         record.name ||
         record.policyNo ||
+        record.certificateNo ||
         "Unnamed Record"
     );
 }
@@ -124,33 +150,10 @@ function getCompany(record) {
     );
 }
 
-function getModule(record) {
-    if (record._source === "compliance_records") {
-        return "Compliance";
-    }
-
-    if (record._source === "vehicles") {
-        return String(record.type || "").toLowerCase() === "pollution"
-            ? "Pollution"
-            : "Insurance";
-    }
-
-    const type = String(
-        record.type || record.category || ""
-    ).toLowerCase();
-
-    if (type.includes("warranty")) return "Warranty";
-    if (type.includes("software")) return "Software License";
-    if (type.includes("amc")) return "AMC";
-
-    return "IT Devices";
-}
-
 function getStatus(daysRemaining) {
     if (daysRemaining === null) return "Unknown";
     if (daysRemaining < 0) return "Expired";
     if (daysRemaining <= 10) return "Expiring Soon";
-
     return "Active";
 }
 
@@ -209,12 +212,26 @@ function SummaryCard({ title, value, description, icon, accent }) {
 }
 
 export default function Dashboard() {
-    const {
-        search,
-        records,
-        loadingData,
-        dataError,
-    } = useDashboardShell();
+    const { search, records, loadingData, dataError } = useDashboardShell();
+
+    const [expiryTypeFilter, setExpiryTypeFilter] = useState("All");
+    const [expirySearch, setExpirySearch] = useState("");
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
+
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
+
+        nextMidnight.setHours(24, 0, 0, 0);
+
+        const timer = setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => clearTimeout(timer);
+    }, [todayKey]);
 
     const allRecords = useMemo(() => {
         return records.map((record) => {
@@ -233,35 +250,34 @@ export default function Dashboard() {
                 status: getStatus(daysRemaining),
             };
         });
-    }, [records]);
+    }, [records, todayKey]);
 
-    const summary = useMemo(() => {
-        return {
-            total: allRecords.length,
+    const summary = useMemo(() => ({
+        total: allRecords.length,
 
-            expiringSoon: allRecords.filter(
-                (record) =>
-                    record.daysRemaining !== null &&
-                    record.daysRemaining >= 0 &&
-                    record.daysRemaining <= 10
-            ).length,
+        expiringSoon: allRecords.filter(
+            (record) =>
+                record.daysRemaining !== null &&
+                record.daysRemaining >= 0 &&
+                record.daysRemaining <= 10
+        ).length,
 
-            expired: allRecords.filter(
-                (record) =>
-                    record.daysRemaining !== null &&
-                    record.daysRemaining < 0
-            ).length,
+        expired: allRecords.filter(
+            (record) =>
+                record.daysRemaining !== null &&
+                record.daysRemaining < 0
+        ).length,
 
-            active: allRecords.filter(
-                (record) =>
-                    record.daysRemaining !== null &&
-                    record.daysRemaining > 10
-            ).length,
-        };
-    }, [allRecords]);
+        active: allRecords.filter(
+            (record) =>
+                record.daysRemaining !== null &&
+                record.daysRemaining > 10
+        ).length,
+    }), [allRecords]);
 
     const upcomingRecords = useMemo(() => {
-        const query = search.trim().toLowerCase();
+        const globalQuery = search.trim().toLowerCase();
+        const localQuery = expirySearch.trim().toLowerCase();
 
         return allRecords
             .filter(
@@ -271,55 +287,47 @@ export default function Dashboard() {
                     record.daysRemaining <= 30
             )
             .filter((record) => {
-                if (!query) return true;
+                if (expiryTypeFilter !== "All" &&
+                    record.module !== expiryTypeFilter) {
+                    return false;
+                }
 
-                return [
+                const searchableValues = [
                     record.productName,
                     record.module,
                     record.companyName,
                     record.status,
-                ].some((value) =>
-                    String(value || "").toLowerCase().includes(query)
-                );
+                ];
+
+                if (
+                    globalQuery &&
+                    !searchableValues.some((value) =>
+                        String(value || "").toLowerCase().includes(globalQuery)
+                    )
+                ) {
+                    return false;
+                }
+
+                if (
+                    localQuery &&
+                    !searchableValues.some((value) =>
+                        String(value || "").toLowerCase().includes(localQuery)
+                    )
+                ) {
+                    return false;
+                }
+
+                return true;
             })
-            .sort(
-                (a, b) => a.daysRemaining - b.daysRemaining
-            )
-            .slice(0, 10);
-    }, [allRecords, search]);
+            .sort((a, b) => a.daysRemaining - b.daysRemaining);
+    }, [allRecords, search, expirySearch, expiryTypeFilter]);
 
-
-    const [expiryTypeFilter, setExpiryTypeFilter] = useState("All");
-    const [expiryStatusFilter, setExpiryStatusFilter] = useState("All");
-    const [expirySearch, setExpirySearch] = useState("");
-
-    const filteredUpcomingRecords = upcomingRecords.filter((record) => {
-        const matchesType =
-            expiryTypeFilter === "All" ||
-            record.module === expiryTypeFilter;
-
-        const matchesStatus =
-            expiryStatusFilter === "All" ||
-            record.status === expiryStatusFilter;
-
-        const searchText = expirySearch.trim().toLowerCase();
-
-        const matchesSearch =
-            !searchText ||
-            [record.productName, record.companyName, record.module]
-                .some((value) =>
-                    String(value || "").toLowerCase().includes(searchText)
-                );
-
-        return matchesType && matchesStatus && matchesSearch;
-    });
+    const visibleUpcomingRecords = upcomingRecords.slice(0, 10);
 
     const clearExpiryFilters = () => {
         setExpiryTypeFilter("All");
-        setExpiryStatusFilter("All");
         setExpirySearch("");
     };
-
 
     return (
         <div className="w-full min-w-0 space-y-6">
@@ -391,12 +399,12 @@ export default function Dashboard() {
                     </div>
 
                     <span className="inline-flex w-fit items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                        {loadingData ? "Loading..." : `${filteredUpcomingRecords.length} records`}
+                        {loadingData ? "Loading..." : `${visibleUpcomingRecords.length} of ${upcomingRecords.length} records`}
                     </span>
                 </div>
 
                 <div className="border-b border-slate-100 bg-slate-50/60 p-4">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
                         <input
                             type="text"
                             value={expirySearch}
@@ -418,22 +426,11 @@ export default function Dashboard() {
                             <option value="Software License">Software License</option>
                             <option value="Compliance">Compliance</option>
                         </select>
-
-                        <select
-                            value={expiryStatusFilter}
-                            onChange={(e) => setExpiryStatusFilter(e.target.value)}
-                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                        >
-                            <option value="All">All Statuses</option>
-                            <option value="Active">Active</option>
-                            <option value="Expiring Soon">Expiring Soon</option>
-                            <option value="Expired">Expired</option>
-                        </select>
                     </div>
 
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                         <p className="text-xs text-slate-500">
-                            Showing {filteredUpcomingRecords.length} of {upcomingRecords.length} records
+                            Showing {visibleUpcomingRecords.length} of {upcomingRecords.length} matching records
                         </p>
 
                         <button
@@ -450,60 +447,37 @@ export default function Dashboard() {
                     <table className="min-w-[900px] w-full text-left text-sm">
                         <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                             <tr>
-                                <th className="px-5 py-3 font-semibold">
-                                    S. No.
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Product / Record
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Module
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Company / Vendor
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Start Date
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Expiry Date
-                                </th>
-                                <th className="px-5 py-3 font-semibold">
-                                    Status
-                                </th>
+                                <th className="px-5 py-3 font-semibold">S. No.</th>
+                                <th className="px-5 py-3 font-semibold">Product / Record</th>
+                                <th className="px-5 py-3 font-semibold">Module</th>
+                                <th className="px-5 py-3 font-semibold">Company / Vendor</th>
+                                <th className="px-5 py-3 font-semibold">Start Date</th>
+                                <th className="px-5 py-3 font-semibold">Expiry Date</th>
+                                <th className="px-5 py-3 font-semibold">Status</th>
                             </tr>
                         </thead>
 
                         <tbody className="divide-y divide-slate-100">
                             {loadingData ? (
                                 <tr>
-                                    <td
-                                        colSpan={7}
-                                        className="px-5 py-12 text-center text-sm text-slate-500"
-                                    >
+                                    <td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-500">
                                         Loading records...
                                     </td>
                                 </tr>
-                            ) : filteredUpcomingRecords.length === 0 ? (
+                            ) : visibleUpcomingRecords.length === 0 ? (
                                 <tr>
-                                    <td
-                                        colSpan={7}
-                                        className="px-5 py-12 text-center"
-                                    >
-                                        <div className="text-2xl text-slate-300">
-                                            ✓
-                                        </div>
+                                    <td colSpan={7} className="px-5 py-12 text-center">
+                                        <div className="text-2xl text-slate-300">✓</div>
                                         <p className="mt-2 font-semibold text-slate-700">
                                             No upcoming expiries found
                                         </p>
                                         <p className="mt-1 text-sm text-slate-500">
-                                            Records expiring in the next 30 days
-                                            will appear here.
+                                            Records expiring in the next 30 days will appear here.
                                         </p>
                                     </td>
                                 </tr>
                             ) : (
-                                filteredUpcomingRecords.map((record, index) => (
+                                visibleUpcomingRecords.map((record, index) => (
                                     <tr
                                         key={`${record.module}-${record.id}`}
                                         className="transition hover:bg-slate-50"
@@ -535,9 +509,7 @@ export default function Dashboard() {
                                         </td>
 
                                         <td className="px-5 py-4">
-                                            <StatusBadge
-                                                status={record.status}
-                                            />
+                                            <StatusBadge status={record.status} />
                                         </td>
                                     </tr>
                                 ))
@@ -548,8 +520,7 @@ export default function Dashboard() {
 
                 <div className="border-t border-slate-100 px-5 py-3">
                     <p className="text-xs text-slate-500">
-                        Showing up to 10 upcoming records. Use the search bar
-                        in the title bar to filter this table.
+                        Showing up to 10 upcoming records. Use the search and module filters to narrow the results.
                     </p>
                 </div>
             </section>

@@ -43,31 +43,48 @@ const MODULE_CONFIG = [
         name: "AMC",
         collection: "it_devices",
         allowedTypes: ["amc"],
-        expiryFields: ["endDate", "expiryDate"],
+        expiryFields: ["endDate"],
     },
     {
         name: "Warranty",
         collection: "it_devices",
         allowedTypes: ["warranty"],
-        expiryFields: ["endDate", "expiryDate"],
+        expiryFields: [
+            "warrantyExpiry",
+            "warrantyExpired",
+            "endDate",
+            "expiryDate",
+        ],
+    },
+    {
+        name: "Software License",
+        collection: "it_devices",
+        allowedTypes: ["software license"],
+        expiryFields: ["expiryDate"],
     },
     {
         name: "Insurance",
         collection: "vehicles",
         allowedTypes: ["insurance"],
-        expiryFields: ["expiryDate", "endDate"],
+        expiryFields: ["expiryDate"],
     },
     {
         name: "Pollution",
         collection: "vehicles",
         allowedTypes: ["pollution"],
-        expiryFields: ["expiryDate", "endDate"],
+        expiryFields: ["expiryDate", "pollutionExpiryDate"],
     },
     {
         name: "Compliance",
         collection: "compliance_records",
         allowedTypes: ["compliance"],
-        expiryFields: ["validTill", "validTillDate", "expiryDate"],
+        expiryFields: [
+            "validTill",
+            "validUntil",
+            "validTillDate",
+            "expiryDate",
+            "endDate",
+        ],
     },
 ];
 
@@ -422,6 +439,7 @@ async function readModuleRecords(config, today, reminderDays) {
 
         const title = firstValue(data, [
             "productName",
+            "licenseName",
             "product",
             "item",
             "vehicleNo",
@@ -436,13 +454,16 @@ async function readModuleRecords(config, today, reminderDays) {
         const company = firstValue(data, [
             "company",
             "companyName",
-            "companyJisseLiHai",
             "vendor",
             "supplier",
             "insuranceCompany",
+            "insurerCompany",
+            "serviceProvider",
             "companyVendor",
             "partnerCompany",
             "pucCentre",
+            "pucCenter",
+            "unit",
         ]);
 
         records.push({
@@ -524,7 +545,7 @@ function buildEmailHtml(records, today, isTest) {
                         <tr>
                             <th>Module</th>
                             <th>Record</th>
-                            <th>Company / Vendor</th>
+                            <th>Company / Vendor / Unit</th>
                             <th>Expiry Date</th>
                             <th>Reminder</th>
                         </tr>
@@ -938,14 +959,7 @@ async function main() {
         `Active Super Admins: ${superAdmins.length}; active Admins: ${admins.length}`
     );
 
-    const recipientMap = await buildProductionRecipients(
-        records,
-        settings,
-        usersByUid,
-        superAdmins,
-        admins,
-        today
-    );
+    const recipientMap = preview;
 
     if (!recipientMap.size) {
         console.log(

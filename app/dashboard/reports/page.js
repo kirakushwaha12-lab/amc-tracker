@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDashboardShell } from "../layout";
 
 const MODULES = [
@@ -34,9 +34,29 @@ function toDate(value) {
         return Number.isNaN(value.getTime()) ? null : value;
     }
 
-    if (typeof value === "string" || typeof value === "number") {
-        const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? null : date;
+    if (typeof value === "string") {
+        const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+        if (match) {
+            const [, year, month, day] = match;
+            return new Date(
+                Number(year),
+                Number(month) - 1,
+                Number(day)
+            );
+        }
+
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof value === "number") {
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof value === "object" && Number.isFinite(value.seconds)) {
+        return new Date(value.seconds * 1000);
     }
 
     return null;
@@ -48,12 +68,18 @@ function getModule(record) {
     }
 
     if (record._source === "vehicles") {
-        return String(record.type || "").toLowerCase() === "pollution"
+        const type = String(
+            record.type || record.category || ""
+        ).toLowerCase();
+
+        return type.includes("pollution")
             ? "Pollution"
             : "Insurance";
     }
 
-    const type = String(record.type || record.category || "").toLowerCase();
+    const type = String(
+        record.type || record.category || ""
+    ).toLowerCase();
 
     if (type.includes("warranty")) return "Warranty";
     if (type.includes("software")) return "Software License";
@@ -63,33 +89,36 @@ function getModule(record) {
 }
 
 function getExpiryDate(record) {
-    const fields =
-        record._source === "compliance_records"
-            ? [
-                "expiryDate",
-                "endDate",
-                "validTill",
-                "validUntil",
-                "validTillDate",
-                "renewalDate",
-                "date",
-            ]
-            : record._source === "vehicles"
-                ? [
-                    "expiryDate",
-                    "renewalDate",
-                    "endDate",
-                    "date",
-                    "pollutionExpiryDate",
-                ]
-                : [
-                    "endDate",
-                    "expiryDate",
-                    "warrantyExpiry",
-                    "warrantyExpired",
-                    "renewalDate",
-                    "date",
-                ];
+    const module = getModule(record);
+
+    let fields;
+
+    if (module === "Insurance") {
+        fields = ["expiryDate"];
+    } else if (module === "Pollution") {
+        fields = ["expiryDate", "pollutionExpiryDate"];
+    } else if (module === "Compliance") {
+        fields = [
+            "validTill",
+            "validUntil",
+            "validTillDate",
+            "expiryDate",
+            "endDate",
+        ];
+    } else if (module === "AMC") {
+        fields = ["endDate"];
+    } else if (module === "Warranty") {
+        fields = [
+            "warrantyExpiry",
+            "warrantyExpired",
+            "endDate",
+            "expiryDate",
+        ];
+    } else if (module === "Software License") {
+        fields = ["expiryDate"];
+    } else {
+        fields = ["endDate", "expiryDate"];
+    }
 
     for (const field of fields) {
         const date = toDate(record[field]);
@@ -104,8 +133,8 @@ function getStartDate(record) {
 
     const fields =
         module === "Pollution"
-            ? ["certificateDate", "startDate", "periodDate", "issueDate", "date"]
-            : record._source === "compliance_records"
+            ? ["certificateDate", "startDate"]
+            : module === "Compliance"
                 ? ["examinationDate", "startDate", "periodDate"]
                 : ["startDate", "periodDate", "purchaseDate"];
 
@@ -124,8 +153,10 @@ function getProductName(record) {
         record.product ||
         record.item ||
         record.vehicleNo ||
+        record.vehicleNumber ||
         record.name ||
         record.policyNo ||
+        record.certificateNo ||
         "Unnamed Record"
     );
 }
@@ -192,7 +223,8 @@ function getAmount(record) {
         record.charges ??
         record.amount ??
         record.price ??
-        record.amcCharges;
+        record.amcCharges ??
+        record.priceWithoutGST;
 
     return value === undefined || value === null || value === ""
         ? "—"
@@ -210,6 +242,23 @@ export default function ReportsPage() {
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
     const [showAll, setShowAll] = useState(false);
+
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
+
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
+
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
 
     const normalizedRecords = useMemo(() => {
         return records.map((record) => {
@@ -229,7 +278,7 @@ export default function ReportsPage() {
                 status: getStatus(daysRemaining),
             };
         });
-    }, [records]);
+    }, [records, todayKey]);
 
     const filteredRecords = useMemo(() => {
         const query = search.trim().toLowerCase();
@@ -537,7 +586,8 @@ export default function ReportsPage() {
                                         loadingData ||
                                         filteredRecords.length === 0
                                     }
-                                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                                    style={{ backgroundColor: "#0b4da2" }}
                                 >
                                     <span aria-hidden="true">▤</span>
                                     Print / Save as PDF
@@ -763,15 +813,14 @@ export default function ReportsPage() {
                                                 </td>
                                                 <td className="px-5 py-4">
                                                     <span
-                                                        className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                                            record.status === "Active"
-                                                                ? "bg-emerald-50 text-emerald-700"
-                                                                : record.status === "Expiring Soon"
-                                                                    ? "bg-amber-50 text-amber-700"
-                                                                    : record.status === "Expired"
-                                                                        ? "bg-red-50 text-red-700"
-                                                                        : "bg-slate-100 text-slate-600"
-                                                        }`}
+                                                        className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${record.status === "Active"
+                                                            ? "bg-emerald-50 text-emerald-700"
+                                                            : record.status === "Expiring Soon"
+                                                                ? "bg-amber-50 text-amber-700"
+                                                                : record.status === "Expired"
+                                                                    ? "bg-red-50 text-red-700"
+                                                                    : "bg-slate-100 text-slate-600"
+                                                            }`}
                                                     >
                                                         {record.status}
                                                     </span>

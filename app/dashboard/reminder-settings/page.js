@@ -30,7 +30,6 @@ const MODULES = [
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// 06:00 AM to 10:00 PM, every 15 minutes.
 const EMAIL_TIME_OPTIONS = Array.from(
     { length: 65 },
     (_, index) => {
@@ -65,14 +64,19 @@ function normalizeRole(value) {
 function isSuperAdminUser(user, profile) {
     const role = normalizeRole(profile?.role);
 
-    return user.uid === SUPER_ADMIN_UID || (
-        profile?.active !== false &&
-        ["super admin", "superadmin"].includes(role)
+    return (
+        user.uid === SUPER_ADMIN_UID ||
+        (
+            profile?.active === true &&
+            ["super admin", "superadmin"].includes(role)
+        )
     );
 }
 
 function cleanReminderDays(value) {
-    if (!Array.isArray(value)) return DEFAULT_DAYS;
+    if (!Array.isArray(value)) {
+        return DEFAULT_DAYS;
+    }
 
     const numbers = value
         .map(Number)
@@ -93,6 +97,16 @@ function cleanEmailTime(value) {
         : DEFAULT_EMAIL_TIME;
 }
 
+function createEmptyOperators() {
+    return {
+        AMC: [],
+        Warranty: [],
+        Insurance: [],
+        Pollution: [],
+        Compliance: [],
+    };
+}
+
 export default function ReminderSettingsPage() {
     const router = useRouter();
 
@@ -102,140 +116,134 @@ export default function ReminderSettingsPage() {
 
     const [daysText, setDaysText] = useState("10, 3, 1, 0");
     const [emailTime, setEmailTime] = useState(DEFAULT_EMAIL_TIME);
-
     const [users, setUsers] = useState([]);
+    const [moduleOperators, setModuleOperators] = useState(
+        createEmptyOperators()
+    );
 
-    const [moduleOperators, setModuleOperators] = useState({
-        AMC: [],
-        Warranty: [],
-        Insurance: [],
-        Pollution: [],
-        Compliance: [],
-    });
-
-    const [message, setMessage] = useState("");
     const [error, setError] = useState("");
 
     useEffect(() => {
         let cancelled = false;
 
-        const unsubscribe = onAuthStateChanged(auth, async (user) => {
-            if (!user) {
-                router.replace("/");
-                return;
-            }
+        const unsubscribe = onAuthStateChanged(
+            auth,
+            async (user) => {
+                setAllowed(false);
+                setError("");
 
-            setLoading(true);
-
-            try {
-                const profileSnapshot = await getDoc(
-                    doc(db, "users", user.uid)
-                );
-
-                const profile = profileSnapshot.exists()
-                    ? profileSnapshot.data()
-                    : {};
-
-                const permitted = isSuperAdminUser(user, profile);
-
-                if (cancelled) return;
-
-                setAllowed(permitted);
-
-                if (!permitted) {
-                    setError(
-                        "Only Super Admin can change expiry reminder settings."
-                    );
-                    setLoading(false);
+                if (!user) {
+                    router.replace("/");
                     return;
                 }
 
-                const [settingsSnapshot, usersSnapshot] =
-                    await Promise.all([
-                        getDoc(SETTINGS_REF),
-                        getDocs(collection(db, "users")),
-                    ]);
+                setLoading(true);
 
-                const settings = settingsSnapshot.exists()
-                    ? settingsSnapshot.data()
-                    : {};
-
-                const activeUsers = usersSnapshot.docs
-                    .map((item) => {
-                        const data = item.data();
-
-                        return {
-                            uid: item.id,
-                            name: String(
-                                data.name ||
-                                data.displayName ||
-                                data.email ||
-                                "User"
-                            ).trim(),
-                            email: String(data.email || "")
-                                .trim()
-                                .toLowerCase(),
-                            role: String(data.role || "Viewer"),
-                            active: data.active !== false,
-                        };
-                    })
-                    .filter(
-                        (item) =>
-                            item.active && EMAIL_RE.test(item.email)
-                    )
-                    .sort((a, b) =>
-                        a.name.localeCompare(b.name)
+                try {
+                    const profileSnapshot = await getDoc(
+                        doc(db, "users", user.uid)
                     );
 
-                const savedOperators =
-                    settings.moduleOperators &&
-                    typeof settings.moduleOperators === "object"
-                        ? settings.moduleOperators
+                    if (cancelled) return;
+
+                    const profile = profileSnapshot.exists()
+                        ? profileSnapshot.data()
                         : {};
 
-                const normalizedOperators = {};
+                    const permitted = isSuperAdminUser(user, profile);
 
-                for (const moduleName of MODULES) {
-                    normalizedOperators[moduleName] =
-                        Array.isArray(savedOperators[moduleName])
-                            ? [
-                                ...new Set(
-                                    savedOperators[moduleName].map(String)
-                                ),
-                            ]
+                    setAllowed(permitted);
+
+                    if (!permitted) {
+                        setError(
+                            "Only an active Super Admin can change expiry reminder settings."
+                        );
+                        setLoading(false);
+                        return;
+                    }
+
+                    const [settingsSnapshot, usersSnapshot] =
+                        await Promise.all([
+                            getDoc(SETTINGS_REF),
+                            getDocs(collection(db, "users")),
+                        ]);
+
+                    if (cancelled) return;
+
+                    const settings = settingsSnapshot.exists()
+                        ? settingsSnapshot.data()
+                        : {};
+
+                    const activeEditors = usersSnapshot.docs
+                        .map((item) => {
+                            const data = item.data();
+
+                            return {
+                                uid: item.id,
+                                name: String(
+                                    data.name ||
+                                    data.displayName ||
+                                    data.email ||
+                                    "User"
+                                ).trim(),
+                                email: String(data.email || "")
+                                    .trim()
+                                    .toLowerCase(),
+                                role: String(data.role || "Viewer"),
+                                active: data.active === true,
+                            };
+                        })
+                        .filter(
+                            (item) =>
+                                item.active &&
+                                normalizeRole(item.role) === "editor" &&
+                                EMAIL_RE.test(item.email)
+                        )
+                        .sort((a, b) => a.name.localeCompare(b.name));
+
+                    const validEditorUids = new Set(
+                        activeEditors.map((item) => item.uid)
+                    );
+
+                    const savedOperators =
+                        settings.moduleOperators &&
+                            typeof settings.moduleOperators === "object"
+                            ? settings.moduleOperators
+                            : {};
+
+                    const normalizedOperators = createEmptyOperators();
+
+                    for (const moduleName of MODULES) {
+                        const saved = Array.isArray(
+                            savedOperators[moduleName]
+                        )
+                            ? savedOperators[moduleName].map(String)
                             : [];
-                }
 
-                if (!cancelled) {
-                    setUsers(activeUsers);
+                        normalizedOperators[moduleName] = [
+                            ...new Set(saved),
+                        ].filter((uid) => validEditorUids.has(uid));
+                    }
+
+                    setUsers(activeEditors);
                     setModuleOperators(normalizedOperators);
-
                     setDaysText(
-                        cleanReminderDays(
-                            settings.reminderDays
-                        ).join(", ")
+                        cleanReminderDays(settings.reminderDays).join(", ")
                     );
-
-                    setEmailTime(
-                        cleanEmailTime(settings.emailTime)
-                    );
-
+                    setEmailTime(cleanEmailTime(settings.emailTime));
                     setLoading(false);
-                }
-            } catch (err) {
-                console.error(
-                    "Reminder settings load error:",
-                    err
-                );
+                } catch (err) {
+                    console.error("Reminder settings load error:", err);
 
-                if (!cancelled) {
-                    setError(
-                        "Settings or users could not be loaded. Check Firestore permissions."
-                    );
-                    setLoading(false);
+                    if (!cancelled) {
+                        setError(
+                            "Settings or users could not be loaded. Check Firestore permissions."
+                        );
+                        setLoading(false);
+                    }
                 }
             }
-        });
+        );
 
         return () => {
             cancelled = true;
@@ -256,9 +264,7 @@ export default function ReminderSettingsPage() {
 
     function toggleOperator(moduleName, uid, checked) {
         setModuleOperators((current) => {
-            const selected = new Set(
-                current[moduleName] || []
-            );
+            const selected = new Set(current[moduleName] || []);
 
             if (checked) {
                 selected.add(uid);
@@ -277,12 +283,8 @@ export default function ReminderSettingsPage() {
         event.preventDefault();
 
         setError("");
-        setMessage("");
 
-        const rawDays = daysText
-            .split(/[,\s]+/)
-            .filter(Boolean);
-
+        const rawDays = daysText.split(/[,\s]+/).filter(Boolean);
         const parsedDays = rawDays.map(Number);
 
         if (
@@ -295,7 +297,7 @@ export default function ReminderSettingsPage() {
             )
         ) {
             setError(
-                "Enter whole numbers from 0 to 365, separated by commas. Example: 15, 7, 3, 1, 0."
+                "Enter valid whole numbers from 0 to 365, separated by commas."
             );
             return;
         }
@@ -306,12 +308,8 @@ export default function ReminderSettingsPage() {
         }
 
         const reminderDays = cleanReminderDays(parsedDays);
-
-        const validUids = new Set(
-            users.map((user) => user.uid)
-        );
-
-        const safeOperators = {};
+        const validUids = new Set(users.map((user) => user.uid));
+        const safeOperators = createEmptyOperators();
 
         for (const moduleName of MODULES) {
             safeOperators[moduleName] = [
@@ -335,23 +333,14 @@ export default function ReminderSettingsPage() {
                 { merge: true }
             );
 
-            setDaysText(reminderDays.join(", "));
-            setEmailTime(emailTime);
-            setModuleOperators(safeOperators);
-
-            setMessage(
-                "Reminder days, email time and module operators saved successfully."
-            );
+            router.replace("/dashboard/users");
         } catch (err) {
-            console.error(
-                "Reminder settings save error:",
-                err
-            );
+            console.error("Reminder settings save error:", err);
 
             setError(
                 "Could not save settings. Check Firestore permissions."
             );
-        } finally {
+
             setSaving(false);
         }
     }
@@ -367,26 +356,12 @@ export default function ReminderSettingsPage() {
     return (
         <main className="min-h-screen bg-slate-100 p-4 sm:p-6 lg:p-8">
             <div className="mx-auto max-w-5xl">
-                <button
-                    type="button"
-                    onClick={() =>
-                        router.push("/dashboard/users")
-                    }
-                    className="text-sm font-semibold text-blue-700"
-                >
-                    ← Back to User Management
-                </button>
+
 
                 <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                     <h1 className="text-2xl font-bold text-slate-900">
                         Expiry Reminder Settings
                     </h1>
-
-                    <p className="mt-2 text-sm text-slate-600">
-                        Configure reminder dates, email delivery time
-                        and operators for each submodule.
-                        No assignment is added to individual records.
-                    </p>
 
                     {!allowed ? (
                         <p className="mt-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
@@ -397,7 +372,6 @@ export default function ReminderSettingsPage() {
                             onSubmit={handleSave}
                             className="mt-6 space-y-7"
                         >
-                            {/* Reminder Schedule */}
                             <div>
                                 <h2 className="text-base font-bold text-slate-900">
                                     Reminder Schedule
@@ -409,33 +383,18 @@ export default function ReminderSettingsPage() {
                                     <input
                                         value={daysText}
                                         onChange={(event) =>
-                                            setDaysText(
-                                                event.target.value
-                                            )
+                                            setDaysText(event.target.value)
                                         }
                                         placeholder="15, 7, 3, 1, 0"
                                         className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3 text-base font-normal outline-none focus:border-blue-500"
                                     />
                                 </label>
-
-                                <p className="mt-2 text-xs text-slate-500">
-                                    Example: 15, 7, 3, 1, 0.
-                                    Calendar days in Asia/Kolkata.
-                                    Day 0 (expiry date) is always included.
-                                    Maximum 365 days.
-                                </p>
                             </div>
 
-                            {/* Email Delivery Time */}
                             <div className="rounded-xl border border-slate-200 p-4">
                                 <h2 className="text-base font-bold text-slate-900">
                                     Email Delivery Time
                                 </h2>
-
-                                <p className="mt-1 text-sm text-slate-600">
-                                    Choose when the daily expiry reminder
-                                    emails should be processed.
-                                </p>
 
                                 <label className="mt-4 block text-sm font-semibold text-slate-700">
                                     Send reminder emails at
@@ -448,24 +407,15 @@ export default function ReminderSettingsPage() {
                                         className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base font-normal outline-none focus:border-blue-500"
                                     >
                                         {EMAIL_TIME_OPTIONS.map((time) => (
-                                            <option
-                                                key={time}
-                                                value={time}
-                                            >
+                                            <option key={time} value={time}>
                                                 {formatTimeLabel(time)}
                                             </option>
                                         ))}
                                     </select>
                                 </label>
 
-                                <p className="mt-2 text-xs text-slate-500">
-                                    Available from 06:00 AM to 10:00 PM
-                                    in 15-minute intervals.
-                                </p>
-
                                 <div className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
-                                    <strong>Time Zone:</strong> India
-                                    Standard Time (Asia/Kolkata, UTC+05:30).
+                                    <strong>Time Zone:</strong> India Standard Time (Asia/Kolkata).
 
                                     <br />
 
@@ -474,29 +424,20 @@ export default function ReminderSettingsPage() {
                                 </div>
                             </div>
 
-                            {/* Module Operators */}
                             <div>
                                 <div className="flex flex-wrap items-end justify-between gap-2">
-                                    <div>
-                                        <h2 className="text-base font-bold text-slate-900">
-                                            Submodule Operators
-                                        </h2>
-
-                                        <p className="mt-1 text-sm text-slate-600">
-                                            Select one or more active users
-                                            who handle each submodule.
-                                        </p>
-                                    </div>
+                                    <h2 className="text-base font-bold text-slate-900">
+                                        Submodule Operators
+                                    </h2>
 
                                     <span className="text-xs text-slate-500">
-                                        {selectedCount} module assignment(s)
+                                        {selectedCount} assignment(s)
                                     </span>
                                 </div>
 
                                 {users.length === 0 ? (
                                     <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                        No active users with valid email
-                                        addresses were found in User Management.
+                                        No active Editors with valid email addresses found.
                                     </p>
                                 ) : (
                                     <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -523,9 +464,7 @@ export default function ReminderSettingsPage() {
                                                         >
                                                             <input
                                                                 type="checkbox"
-                                                                checked={(
-                                                                    moduleOperators[moduleName] || []
-                                                                ).includes(user.uid)}
+                                                                checked={(moduleOperators[moduleName] || []).includes(user.uid)}
                                                                 onChange={(event) =>
                                                                     toggleOperator(
                                                                         moduleName,
@@ -548,34 +487,14 @@ export default function ReminderSettingsPage() {
                                                         </label>
                                                     ))}
                                                 </div>
-
-                                                {!moduleOperators[moduleName]?.length && (
-                                                    <p className="mt-2 text-xs text-amber-700">
-                                                        No operator selected.
-                                                        Reminders for this module
-                                                        will be skipped and logged.
-                                                    </p>
-                                                )}
                                             </section>
                                         ))}
                                     </div>
                                 )}
                             </div>
 
-                            {/* Routing Information */}
                             <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">
-                                Upcoming and expiry-day reminders go to
-                                selected operators of that module.
-
-                                <br />
-
-                                Overdue reminders go to those same active
-                                module operators plus active Super Admin accounts.
-
-                                <br />
-
-                                All reminder dates and delivery times use
-                                Asia/Kolkata.
+                                Upcoming and expiry-day reminders go to assigned active Editors. Overdue reminders go only to Super Admin.
                             </div>
 
                             {error && (
@@ -583,22 +502,23 @@ export default function ReminderSettingsPage() {
                                     {error}
                                 </p>
                             )}
-
-                            {message && (
-                                <p className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">
-                                    {message}
-                                </p>
-                            )}
-
-                            <button
-                                type="submit"
-                                disabled={saving}
-                                className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
-                            >
-                                {saving
-                                    ? "Saving…"
-                                    : "Save Reminder Settings"}
-                            </button>
+                            <div className="flex flex-wrap gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => router.push("/dashboard/users")}
+                                    disabled={saving}
+                                    className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={saving}
+                                    className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+                                >
+                                    {saving ? "Saving…" : "Save Reminder Settings"}
+                                </button>
+                            </div>
                         </form>
                     )}
                 </section>

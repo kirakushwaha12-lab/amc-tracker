@@ -23,22 +23,18 @@ service cloud.firestore {
 
     function isActiveUser() {
       return hasUserDocument()
-        && userData().active != false;
+        && userData().active == true;
     }
 
     function userRole() {
       return userData().role;
     }
 
+    // Super Admin must have an active Firestore profile
+    // with the exact Super Admin role.
     function isSuperAdmin() {
-      return signedIn()
-        && (
-          request.auth.uid == "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92"
-          || (
-            isActiveUser()
-            && userRole() == "Super Admin"
-          )
-        );
+      return isActiveUser()
+        && userRole() == "Super Admin";
     }
 
     function isAdmin() {
@@ -56,8 +52,7 @@ service cloud.firestore {
         && userRole() in [
           "Admin",
           "Editor",
-          "Viewer",
-          "User"
+          "Viewer"
         ]
       );
     }
@@ -100,34 +95,26 @@ service cloud.firestore {
 
     match /users/{userId} {
 
-      // Users apna profile padh sakte hain.
-      // Admin aur Super Admin user profiles dekh sakte hain.
       allow get: if signedIn()
         && (
           request.auth.uid == userId
           || canManageUsers()
         );
 
-      // User list sirf Admin aur Super Admin ko.
       allow list: if canManageUsers();
 
-      // Super Admin koi bhi valid user profile create kar sakta hai.
-      // Admin sirf Viewer aur Editor profiles create kar sakta hai.
       allow create: if isSuperAdmin()
         || validAdminCreatedUser();
 
-      // Role/status changes sirf Super Admin kar sakta hai.
       allow update, delete: if isSuperAdmin();
     }
 
-    
-    // Expiry Reminder Settings
     match /app_settings/{settingId} {
       allow get: if isSuperAdmin() || isActiveUser();
       allow list: if false;
       allow create, update, delete: if isSuperAdmin();
     }
-    
+
     match /it_devices/{documentId} {
       allow read: if canReadRecords();
       allow create, update: if canEditRecords();

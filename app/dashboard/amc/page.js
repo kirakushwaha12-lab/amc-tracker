@@ -1,6 +1,6 @@
 
 "use client";
-
+import imageCompression from "browser-image-compression";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
@@ -13,8 +13,13 @@ import {
     getDoc,
     updateDoc,
     deleteDoc,
+    deleteField,
 } from "firebase/firestore";
 import { auth, db } from "../../../lib/firebase";
+import {
+    extractDocumentFields,
+    mergeExtractedFields,
+} from "../../lib/document-ocr";
 
 const BLUE = "#0b4da2";
 const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
@@ -78,9 +83,8 @@ function StatusBadge({ status }) {
 
     return (
         <span
-            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${
-                styles[status] || styles.Unknown
-            }`}
+            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${styles[status] || styles.Unknown
+                }`}
         >
             {status}
         </span>
@@ -111,6 +115,305 @@ const initialForm = {
     remarks: "",
 };
 
+const MAX_DOCUMENT_SIZE = 500 * 1024;
+
+const ALLOWED_DOCUMENT_EXTENSIONS = [
+    "pdf",
+    "jpg",
+    "jpeg",
+    "png",
+    "doc",
+    "docx",
+];
+
+function getDocumentExtension(fileName = "") {
+    return fileName.split(".").pop()?.toLowerCase() || "";
+}
+
+async function compressImageIfNeeded(file) {
+    const extension = getDocumentExtension(file.name);
+    const isImage = ["jpg", "jpeg", "png"].includes(extension);
+
+    if (!isImage || file.size <= 100 * 1024) {
+        return file;
+    }
+
+    const compressedFile = await imageCompression(file, {
+        maxSizeMB: 0.2,
+        maxWidthOrHeight: 1600,
+        useWebWorker: true,
+    });
+
+    return compressedFile.size < file.size ? compressedFile : file;
+}
+
+function readDocumentAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () =>
+            reject(new Error("Document could not be read."));
+
+        reader.readAsDataURL(file);
+    });
+}
+
+async function openSavedDocument(dataUrl) {
+    if (!dataUrl) return;
+
+    const newWindow = window.open("about:blank", "_blank");
+
+    if (!newWindow) {
+        alert("Please allow pop-ups to view the document.");
+        return;
+    }
+
+    try {
+        const response = await fetch(dataUrl);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+
+        newWindow.location.href = objectUrl;
+
+        window.setTimeout(() => {
+            URL.revokeObjectURL(objectUrl);
+        }, 60000);
+    } catch (error) {
+        console.error("Document open error:", error);
+        newWindow.close();
+        alert("Document could not be opened.");
+    }
+}
+
+function formatDocumentSize(size) {
+    if (!Number.isFinite(Number(size)) || Number(size) <= 0) {
+        return "";
+    }
+
+    return `${(Number(size) / 1024).toFixed(0)} KB`;
+}
+
+
+function extractAmcFallbackFields(rawText) {
+    const text = String(rawText || "")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/\r/g, "\n");
+
+    const lines = text
+        .split("\n")
+        .map(line => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+
+    const result = {};
+
+    const datePattern =
+        /\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{1,2}[-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s]\d{2,4}\b/gi;
+
+    function parseDate(value) {
+        const match = String(value ?? "").match(datePattern);
+        if (!match) return "";
+
+        const raw = match[0];
+        const numeric = raw.match(
+            /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/
+        );
+
+        if (numeric) {
+            let year = Number(numeric[3]);
+            if (year < 100) year += 2000;
+
+            const day = Number(numeric[1]);
+            const month = Number(numeric[2]);
+
+            if (month < 1 || month > 12 || day < 1 || day > 31) {
+                return "";
+            }
+
+            return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        }
+
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) return "";
+
+        return [
+            parsed.getFullYear(),
+            String(parsed.getMonth() + 1).padStart(2, "0"),
+            String(parsed.getDate()).padStart(2, "0"),
+        ].join("-");
+    }
+
+    function getAmount(value) {
+        const match = String(value ?? "").match(
+            /(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)/i
+        );
+
+        if (!match) return null;
+
+        const amount = Number(match[1].replace(/,/g, ""));
+        return Number.isFinite(amount) ? amount : null;
+    }
+
+    // 1. Service / contract period
+    for (const line of lines) {
+        if (
+            !/\b(period|validity|valid from|valid to|coverage|service period|contract period|commencement|effective|duration)\b/i.test(line)
+        ) {
+            continue;
+        }
+
+        const dates = line.match(datePattern) || [];
+
+        if (dates.length >= 2) {
+            result.startDate = parseDate(dates[0]);
+            result.endDate = parseDate(dates[1]);
+            break;
+        }
+    }
+
+    // 2. Generic table extraction
+    const tableLines = lines.filter(line => line.includes("|"));
+
+    for (let i = 0; i < tableLines.length; i++) {
+        const headerCells = tableLines[i]
+            .split("|")
+            .map(cell => cell.trim());
+
+        const descriptionIndex = headerCells.findIndex(cell =>
+            /\b(description|particulars|item details|product details|goods description)\b/i.test(cell)
+        );
+
+        const amountIndex = headerCells.findIndex(cell =>
+            /^\s*(?:amount|line amount|line total)\s*$/i.test(cell)
+        );
+
+        const rateIndex = headerCells.findIndex(cell =>
+            /^\s*(?:rate|unit price)\s*$/i.test(cell)
+        );
+
+        if (descriptionIndex < 0) continue;
+
+        for (let j = i + 1; j < tableLines.length; j++) {
+            const row = tableLines[j]
+                .split("|")
+                .map(cell =>
+                    cell.replace(/<[^>]*>/g, " ")
+                        .replace(/\s+/g, " ")
+                        .trim()
+                );
+
+            if (row.every(cell => !cell)) continue;
+            if (row.some(cell => /^:?-{2,}:?$/.test(cell))) continue;
+
+            // Description column only — never quantity or rate columns.
+            const description = String(
+                row[descriptionIndex] ?? ""
+            ).replace(/\s+/g, " ").trim();
+
+            if (description && !result.productName) {
+                const candidates = description
+                    .split(/\n/)
+                    .map(value => value.trim())
+                    .filter(Boolean);
+
+                let product = "";
+
+                for (const candidate of candidates) {
+                    const cleaned = candidate
+                        .replace(/<[^>]*>/g, " ")
+                        .replace(/\s+/g, " ")
+                        .replace(/^[\d.)\s-]+/, "")
+                        .replace(/^(?:servicing\s*&\s*maintenance|servicing\s+and\s+maintenance)\s*/i, "")
+                        .replace(/^(?:AMC|CMC)(?:\s*\/\s*(?:AMC|CMC))?\s*(?:FOR|OF)\s*/i, "")
+                        .replace(/\b(?:all parts covered|including|excluding)\b.*$/i, "")
+                        .replace(/\b(?:period|validity)\b.*$/i, "")
+                        .trim();
+
+                    if (
+                        cleaned &&
+                        /[a-z]{2,}/i.test(cleaned) &&
+                        !/^(?:AMC|CMC|servicing|maintenance)$/i.test(cleaned)
+                    ) {
+                        product = cleaned;
+                        break;
+                    }
+                }
+
+                if (product) {
+                    result.productName = product;
+                }
+            }
+
+            const amountCell = String(
+                amountIndex >= 0 ? row[amountIndex] ?? "" : ""
+            );
+
+            const rateCell = String(
+                rateIndex >= 0 ? row[rateIndex] ?? "" : ""
+            );
+
+            const rowAmount = getAmount(amountCell);
+            const rowRate = getAmount(rateCell);
+
+            if (rowAmount !== null && result.cost === undefined) {
+                result.cost = String(rowAmount);
+            } else if (rowRate !== null && result.cost === undefined) {
+                result.cost = String(rowRate);
+            }
+
+            // Stop after the first populated item row.
+            if (description) break;
+        }
+
+        break;
+    }
+
+    // 3. Explicit final payable / grand total has highest priority.
+    const totalPatterns = [
+        /(?:grand\s*total|net\s*payable|amount\s*payable|total\s*payable|invoice\s*total|total\s*amount|amount\s*chargeable)\s*[:\-]?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+        /(?:total)\s*[:\-]?\s*(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d{1,2})?)/i,
+    ];
+
+    for (const pattern of totalPatterns) {
+        const match = text.match(pattern);
+
+        if (match) {
+            const amount = getAmount(match[1]);
+
+            if (amount !== null) {
+                result.cost = String(amount);
+                break;
+            }
+        }
+    }
+
+    // 4. If explicit final total is absent, use base amount + clearly labelled taxes.
+    // Do not calculate tax unless the tax labels and amounts are actually detected.
+    if (!totalPatterns.some(pattern => pattern.test(text))) {
+        const taxAmounts = [];
+        const taxPattern =
+            /\b(?:CGST|SGST|IGST|GST)\b[^\d₹]{0,30}(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)/gi;
+
+        let taxMatch;
+
+        while ((taxMatch = taxPattern.exec(text)) !== null) {
+            const amount = getAmount(taxMatch[1]);
+            if (amount !== null) taxAmounts.push(amount);
+        }
+
+        const hasBaseAmount = result.cost !== undefined;
+        const hasTaxLabels = /\b(?:CGST|SGST|IGST|GST)\b/i.test(text);
+
+        if (hasBaseAmount && taxAmounts.length > 0 && hasTaxLabels) {
+            const totalTax = taxAmounts.reduce((sum, value) => sum + value, 0);
+            result.cost = String(Number(result.cost) + totalTax);
+        }
+    }
+
+    return result;
+}
+
+
 export default function AMCPage() {
     const router = useRouter();
 
@@ -122,6 +425,9 @@ export default function AMCPage() {
     const [formError, setFormError] = useState("");
     const [notice, setNotice] = useState("");
     const [form, setForm] = useState(initialForm);
+    const [selectedDocument, setSelectedDocument] = useState(null);
+    const [existingDocument, setExistingDocument] = useState(null);
+    const [ocrStatus, setOcrStatus] = useState("");
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState("All");
     const [periodFilter, setPeriodFilter] = useState("All");
@@ -200,14 +506,21 @@ export default function AMCPage() {
                             ...item.data(),
                         }));
 
-                        setRecords(
-                            allRecords.filter(
-                                (record) =>
-                                    (record.category === "IT Devices" &&
-                                        record.type === "AMC") ||
-                                    (record.category === "AMC" && !record.type)
-                            )
+                        const amcRecords = allRecords.filter(
+                            (record) =>
+                                (record.category === "IT Devices" &&
+                                    record.type === "AMC") ||
+                                (record.category === "AMC" && !record.type)
                         );
+
+                        amcRecords.sort((a, b) => {
+                            const dateA = a.endDate || a.expiryDate || "9999-12-31";
+                            const dateB = b.endDate || b.expiryDate || "9999-12-31";
+
+                            return dateA.localeCompare(dateB);
+                        });
+
+                        setRecords(amcRecords);
 
                         setError("");
                         setLoading(false);
@@ -246,18 +559,30 @@ export default function AMCPage() {
     const preparedRecords = useMemo(
         () =>
             records.map((record) => {
-                const endDate = record.endDate ?? record.expiryDate ?? "";
+                const endDate =
+                    record.endDate || record.expiryDate || "";
+
+                const productName =
+                    record.productName || record.product || "";
+
+                const vendor =
+                    record.vendor || record.company || "";
+
+                const cost =
+                    record.cost !== "" && record.cost != null
+                        ? record.cost
+                        : record.charges ?? "";
 
                 return {
                     ...record,
-                    productName: record.productName ?? record.product ?? "",
+                    productName,
                     productId: record.productId ?? "",
-                    vendor: record.vendor ?? record.company ?? "",
-                    startDate: record.startDate ?? "",
+                    vendor,
+                    startDate: record.startDate || "",
                     endDate,
-                    cost: record.cost ?? record.charges ?? "",
-                    branchUnit: record.branchUnit ?? "",
-                    remarks: record.remarks ?? "",
+                    cost,
+                    branchUnit: record.branchUnit || "",
+                    remarks: record.remarks || "",
                     status: getStatus(endDate),
                 };
             }),
@@ -304,12 +629,12 @@ export default function AMCPage() {
                     (periodFilter === "Expired"
                         ? days < 0
                         : periodFilter === "10"
-                          ? days >= 0 && days <= 10
-                          : periodFilter === "30"
-                            ? days >= 0 && days <= 30
-                            : periodFilter === "90"
-                              ? days >= 0 && days <= 90
-                              : false));
+                            ? days >= 0 && days <= 10
+                            : periodFilter === "30"
+                                ? days >= 0 && days <= 30
+                                : periodFilter === "90"
+                                    ? days >= 0 && days <= 90
+                                    : false));
 
             return matchesSearch && matchesStatus && matchesPeriod;
         });
@@ -323,7 +648,10 @@ export default function AMCPage() {
 
         setEditingId(null);
         setForm(initialForm);
+        setSelectedDocument(null);
+        setExistingDocument(null);
         setFormError("");
+        setOcrStatus("");
         setNotice("");
         setError("");
         setShowForm(true);
@@ -336,6 +664,7 @@ export default function AMCPage() {
         }
 
         setEditingId(record.id);
+
         setForm({
             productName: record.productName || "",
             productId: record.productId || "",
@@ -346,17 +675,175 @@ export default function AMCPage() {
             branchUnit: record.branchUnit || "",
             remarks: record.remarks || "",
         });
+
+        // Load the existing uploaded document into the edit form.
+        setSelectedDocument(null);
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    documentData: record.documentData,
+                    documentName: record.documentName || "Saved document",
+                    documentSize: record.documentSize || 0,
+                    documentType: record.documentType || "",
+                }
+                : null
+        );
+
         setFormError("");
+        setOcrStatus("");
         setNotice("");
         setError("");
         setShowForm(true);
     }
+
 
     function updateForm(event) {
         const { name, value } = event.target;
         setForm((current) => ({ ...current, [name]: value }));
     }
 
+    async function handleDocumentChange(event) {
+        const input = event.target;
+        const file = input.files?.[0];
+
+        input.value = "";
+
+        if (!file) return;
+
+        setFormError("");
+        setOcrStatus("");
+        setSelectedDocument(null);
+
+        const extension = getDocumentExtension(file.name);
+
+        if (!ALLOWED_DOCUMENT_EXTENSIONS.includes(extension)) {
+            setFormError(
+                "Only PDF, JPG, JPEG, PNG, DOC and DOCX files are allowed."
+            );
+            return;
+        }
+
+        try {
+            let processedFile = file;
+
+            if (["jpg", "jpeg", "png"].includes(extension)) {
+                processedFile = await compressImageIfNeeded(file);
+            }
+
+            if (processedFile.size > MAX_DOCUMENT_SIZE) {
+                setFormError(
+                    "Document size must be 500 KB or less. Please choose a smaller file."
+                );
+                return;
+            }
+
+            // Retain the selected document even if OCR processing fails.
+            setSelectedDocument(processedFile);
+
+            const ocrSupported = ["jpg", "jpeg", "png", "pdf"].includes(
+                getDocumentExtension(processedFile.name)
+            );
+
+            if (!ocrSupported) {
+                setOcrStatus(
+                    "Document selected. OCR is available for JPG, PNG and PDF files. You can enter details manually."
+                );
+                return;
+            }
+
+            setOcrStatus("Reading AMC document...");
+
+            try {
+                console.log("Original file:", file.name, file.type);
+                console.log("Processed file:", processedFile.name, processedFile.type);
+                const ocrFormData = new FormData();
+
+                ocrFormData.append(
+                    "file",
+                    processedFile,
+                    processedFile.name
+                );
+
+                const ocrResponse = await fetch("/api/ocr", {
+                    method: "POST",
+                    body: ocrFormData,
+                });
+
+                const ocrData = await ocrResponse.json();
+
+                if (!ocrResponse.ok || !ocrData.success) {
+                    throw new Error(
+                        ocrData.error || "AMC document OCR failed."
+                    );
+                }
+
+                const rawText = ocrData.text || "";
+                console.log("========== AMC RAW OCR TEXT ==========");
+                console.log(rawText);
+                console.log("======================================");
+
+
+                if (!rawText || !rawText.trim()) {
+                    setOcrStatus(
+                        "Document selected, but no readable text was detected. You can enter details manually."
+                    );
+                    return;
+                }
+
+                if (!input.form) {
+                    throw new Error("AMC form could not be identified.");
+                }
+                const commonExtracted = extractDocumentFields(rawText, input.form);
+                const fallbackExtracted = extractAmcFallbackFields(rawText);
+
+                // Prioritize values extracted by the common OCR engine.
+                // Use fallback extraction only for fields not detected by the common OCR engine.
+                const extracted = {
+                    ...commonExtracted,
+                    ...Object.fromEntries(
+                        Object.entries(fallbackExtracted).filter(
+                            ([key, value]) =>
+                                !String(commonExtracted[key] ?? "").trim() &&
+                                String(value ?? "").trim() !== ""
+                        )
+                    ),
+                };
+
+                console.log("AMC COMMON OCR:", commonExtracted);
+                console.log("AMC FALLBACK OCR:", fallbackExtracted);
+                console.log("AMC FINAL OCR:", extracted);
+
+                setForm((current) => {
+                    const result = mergeExtractedFields(current, extracted);
+                    return result.form;
+                });
+
+                const detectedCount = Object.values(extracted).filter(
+                    (value) => String(value ?? "").trim() !== ""
+                ).length;
+
+                setOcrStatus(
+                    detectedCount > 0
+                        ? `${detectedCount} field(s) detected. Please review the extracted details before saving.`
+                        : "Document read, but no matching form fields were detected. You can enter details manually."
+                );
+            } catch (ocrError) {
+                console.error("AMC OCR error:", ocrError);
+
+                setOcrStatus(
+                    "Document selected, but OCR could not read it. You can enter the details manually."
+                );
+            }
+        } catch (err) {
+            console.error("AMC document processing error:", err);
+
+            setFormError(
+                err.message ||
+                "Document could not be processed. Please try another file."
+            );
+        }
+    }
     async function handleSubmit(event) {
         event.preventDefault();
         setFormError("");
@@ -408,16 +895,58 @@ export default function AMCPage() {
             updatedAt: serverTimestamp(),
         };
 
+
+        let documentFields = {};
+
+        try {
+            if (selectedDocument) {
+                const documentData = await readDocumentAsDataUrl(selectedDocument);
+
+                documentFields = {
+                    documentData,
+                    documentName: selectedDocument.name,
+                    documentSize: selectedDocument.size,
+                    documentType:
+                        selectedDocument.type ||
+                        (getDocumentExtension(selectedDocument.name) === "pdf"
+                            ? "application/pdf"
+                            : ""),
+                };
+            } else if (existingDocument?.documentData) {
+                documentFields = {
+                    documentData: existingDocument.documentData,
+                    documentName: existingDocument.documentName,
+                    documentSize: existingDocument.documentSize || 0,
+                    documentType: existingDocument.documentType || "",
+                };
+            } else if (editingId) {
+                documentFields = {
+                    documentData: deleteField(),
+                    documentName: deleteField(),
+                    documentSize: deleteField(),
+                    documentType: deleteField(),
+                };
+            }
+        } catch (err) {
+            console.error("AMC document preparation error:", err);
+            setFormError("Document could not be prepared. Please try again.");
+            setSaving(false);
+            return;
+        }
         try {
             if (editingId) {
                 await updateDoc(
                     doc(db, "it_devices", editingId),
-                    recordData
+                    {
+                        ...recordData,
+                        ...documentFields,
+                    }
                 );
                 setNotice("AMC record updated successfully.");
             } else {
                 await addDoc(collection(db, "it_devices"), {
                     ...recordData,
+                    ...documentFields,
                     createdAt: serverTimestamp(),
                 });
                 setNotice("AMC record saved successfully.");
@@ -427,6 +956,9 @@ export default function AMCPage() {
             setForm(initialForm);
             setEditingId(null);
             setFormError("");
+            setOcrStatus("");
+            setSelectedDocument(null);
+            setExistingDocument(null);
 
             window.setTimeout(() => setNotice(""), 3500);
         } catch (err) {
@@ -436,8 +968,8 @@ export default function AMCPage() {
                 err.code === "permission-denied"
                     ? "Permission denied. Please check Firestore security rules."
                     : editingId
-                      ? "AMC record could not be updated. Please try again."
-                      : "AMC record could not be saved. Please try again."
+                        ? "AMC record could not be updated. Please try again."
+                        : "AMC record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -451,8 +983,7 @@ export default function AMCPage() {
         }
 
         const confirmed = window.confirm(
-            `Are you sure you want to delete "${
-                record.productName || "this AMC record"
+            `Are you sure you want to delete "${record.productName || "this AMC record"
             }"? This action cannot be undone.`
         );
 
@@ -713,6 +1244,15 @@ export default function AMCPage() {
                                             </td>
                                             <td className="whitespace-nowrap px-4 py-4">
                                                 <div className="flex items-center gap-2">
+                                                    {record.documentData && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openSavedDocument(record.documentData)}
+                                                            className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                                                        >
+                                                            View Doc
+                                                        </button>
+                                                    )}
                                                     {canEditRecords && (
                                                         <button
                                                             type="button"
@@ -795,6 +1335,7 @@ export default function AMCPage() {
                                 <input
                                     required
                                     name="productName"
+                                    data-ocr-aliases="Equipment Name|Item Description|Product|Machine Name|Asset Description|Description of Goods|Servicing & Maintenance|AMC/CMC|UPS|Equipment Description"
                                     value={form.productName}
                                     onChange={updateForm}
                                     placeholder="Enter product name"
@@ -806,6 +1347,7 @@ export default function AMCPage() {
                                 Product ID
                                 <input
                                     name="productId"
+                                    data-ocr-aliases="Serial Number|Serial No|Asset ID|Equipment ID|Machine ID|Model Number|Product Code|Item Code"
                                     value={form.productId}
                                     onChange={updateForm}
                                     placeholder="Enter product ID"
@@ -818,6 +1360,7 @@ export default function AMCPage() {
                                 <input
                                     required
                                     name="vendor"
+                                    data-ocr-aliases="Supplier (Bill from)|Bill From|Supplier Name|Vendor Name|Service Provider|AMC Provider|Service Agency|Company Name|Supplier"
                                     value={form.vendor}
                                     onChange={updateForm}
                                     placeholder="Enter vendor name"
@@ -831,6 +1374,7 @@ export default function AMCPage() {
                                     required
                                     type="date"
                                     name="startDate"
+                                    data-ocr-aliases="Service Start Date|AMC Start Date|Contract Start Date|Valid From|Period From|AMC Period From|Service Period From|Contract Period From"
                                     value={form.startDate}
                                     onChange={updateForm}
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
@@ -844,6 +1388,7 @@ export default function AMCPage() {
                                     type="date"
                                     min={form.startDate || undefined}
                                     name="endDate"
+                                    data-ocr-aliases="Service End Date|AMC End Date|Contract End Date|Valid To|Period To|AMC Period To|Service Period To|Contract Period To"
                                     value={form.endDate}
                                     onChange={updateForm}
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
@@ -858,6 +1403,7 @@ export default function AMCPage() {
                                     min="0"
                                     step="0.01"
                                     name="cost"
+                                    data-ocr-aliases="AMC Charges|AMC Amount|Annual Maintenance Charges|Contract Amount|Total Charges|Rate|Basic Amount|AMC/CMC Charges|Service Charges"
                                     value={form.cost}
                                     onChange={updateForm}
                                     placeholder="Enter AMC charges"
@@ -869,6 +1415,7 @@ export default function AMCPage() {
                                 Branch / Unit
                                 <input
                                     name="branchUnit"
+                                    data-ocr-aliases="Branch Name|Unit Name|Location|Site"
                                     value={form.branchUnit}
                                     onChange={updateForm}
                                     placeholder="Enter branch or unit"
@@ -887,6 +1434,101 @@ export default function AMCPage() {
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
                                 />
                             </label>
+
+
+                            <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 sm:col-span-2">
+                                <label className="block text-sm font-semibold text-slate-800">
+                                    AMC Document (optional) <span className="ml-2 font-normal text-slate-500">(Optional)</span>
+                                </label>
+                                <p className="mt-1 text-xs text-slate-500">
+                                    PDF, JPG, PNG, DOC or DOCX · Maximum 500 KB
+                                </p>
+
+                                {existingDocument?.documentData && (
+                                    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
+                                        <span className="min-w-0 flex-1 break-all text-sm text-slate-700">
+                                            {selectedDocument
+                                                ? selectedDocument.name
+                                                : existingDocument.documentName}
+                                        </span>
+
+                                        {!selectedDocument && (
+                                            <button
+                                                type="button"
+                                                onClick={() => openSavedDocument(existingDocument.documentData)}
+                                                className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                            >
+                                                View
+                                            </button>
+                                        )}
+
+                                        <label className="inline-flex cursor-pointer items-center rounded-lg px-3 py-2 text-xs font-semibold text-white"
+                                            style={{ backgroundColor: BLUE }}
+                                        >
+                                            Replace
+                                            <input
+                                                type="file"
+                                                accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                                onChange={handleDocumentChange}
+                                                className="sr-only"
+                                            />
+                                        </label>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setExistingDocument(null);
+                                                setSelectedDocument(null);
+                                            }}
+                                            className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
+                                        >
+                                            Remove
+                                        </button>
+                                    </div>
+                                )}
+
+                                {!existingDocument?.documentData && (
+                                    <label className="mt-3 flex w-full cursor-pointer items-center gap-3 rounded-lg border border-blue-200 bg-white p-3 transition hover:border-blue-400 hover:bg-blue-50">
+                                        <span
+                                            className="inline-flex shrink-0 items-center rounded-lg px-4 py-2 text-sm font-semibold text-white"
+                                            style={{ backgroundColor: BLUE }}
+                                        >
+                                            Choose Document
+                                        </span>
+
+                                        <span className="min-w-0 flex-1 break-all text-sm text-slate-500">
+                                            {selectedDocument ? selectedDocument.name : "No file chosen"}
+                                        </span>
+
+                                        <input
+                                            type="file"
+                                            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                            onChange={handleDocumentChange}
+                                            className="sr-only"
+                                        />
+                                    </label>
+                                )}
+
+                                {selectedDocument && (
+                                    <p className="mt-2 break-all text-xs text-emerald-700">
+                                        Selected: {selectedDocument.name} (
+                                        {(selectedDocument.size / 1024).toFixed(1)} KB)
+                                    </p>
+                                )}
+                                {ocrStatus && (
+                                    <p
+                                        className={`mt-3 rounded-lg p-3 text-xs ${ocrStatus.startsWith("Reading")
+                                            ? "bg-blue-50 text-blue-700"
+                                            : ocrStatus.includes("detected")
+                                                ? "bg-emerald-50 text-emerald-700"
+                                                : "bg-amber-50 text-amber-700"
+                                            }`}
+                                    >
+                                        {ocrStatus}
+                                    </p>
+                                )}
+                            </div>
+
 
                             {formError && (
                                 <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">
@@ -917,8 +1559,8 @@ export default function AMCPage() {
                                             ? "Updating..."
                                             : "Saving..."
                                         : editingId
-                                          ? "Update AMC"
-                                          : "Save AMC"}
+                                            ? "Update AMC"
+                                            : "Save AMC"}
                                 </button>
                             </div>
                         </form>

@@ -13,8 +13,16 @@ import {
     getDoc,
     updateDoc,
     deleteDoc,
+    deleteField,
 } from "firebase/firestore";
+
+import imageCompression from "browser-image-compression";
 import { auth, db } from "../../../lib/firebase";
+import {
+    recognizeDocumentImage,
+    extractDocumentFields,
+    mergeExtractedFields,
+} from "../../lib/document-ocr";
 
 const BLUE = "#0b4da2";
 const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
@@ -44,8 +52,8 @@ function getDays(endDate) {
     const expiry = new Date(`${endDate}T00:00:00`);
     if (Number.isNaN(expiry.getTime())) return null;
 
-    return Math.round(
-        (expiry.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+    return Math.ceil(
+        (expiry.getTime() - today.getTime()) / 86400000
     );
 }
 
@@ -87,6 +95,65 @@ function money(value) {
     });
 }
 
+const MAX_DOCUMENT_SIZE = 500 * 1024;
+
+function getDocumentExtension(name = "") {
+    return name.split(".").pop()?.toLowerCase() || "";
+}
+
+async function compressWarrantyImage(file) {
+    const extension = getDocumentExtension(file.name);
+    const isImage = ["jpg", "jpeg", "png"].includes(extension);
+
+    if (!isImage || file.size <= 100 * 1024) return file;
+
+    const compressed = await imageCompression(file, {
+        maxSizeMB: 0.2,
+        maxWidthOrHeight: 1600,
+        useWebWorker: true,
+        fileType: file.type || undefined,
+    });
+
+    if (compressed.size >= file.size) return file;
+
+    return new File([compressed], file.name, {
+        type: compressed.type || file.type,
+        lastModified: Date.now(),
+    });
+}
+
+function readWarrantyDocument(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read document."));
+
+        reader.readAsDataURL(file);
+    });
+}
+
+async function openWarrantyDocument(data) {
+    const tab = window.open("", "_blank");
+
+    if (!tab) {
+        alert("Please allow pop-ups to view the document.");
+        return;
+    }
+
+    try {
+        const response = await fetch(data);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+
+        tab.location.href = url;
+
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (error) {
+        tab.close();
+        alert("Could not open the document.");
+    }
+}
 function StatusBadge({ status }) {
     const styles = {
         Active: "bg-emerald-50 text-emerald-700",
@@ -97,9 +164,8 @@ function StatusBadge({ status }) {
 
     return (
         <span
-            className={`inline-flex whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${
-                styles[status] || styles.Unknown
-            }`}
+            className={`inline-flex whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${styles[status] || styles.Unknown
+                }`}
         >
             {status}
         </span>
@@ -141,6 +207,11 @@ export default function WarrantyPage() {
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
+    const [selectedDocument, setSelectedDocument] = useState(null);
+    const [existingDocument, setExistingDocument] = useState(null);
+    const [isReadingDocument, setIsReadingDocument] = useState(false);
+    const [documentError, setDocumentError] = useState("");
+
 
     useEffect(() => {
         let unsubscribeRecords = null;
@@ -149,12 +220,11 @@ export default function WarrantyPage() {
         const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
             const currentCheck = ++authCheckId;
 
-            if (!user) {
-                if (unsubscribeRecords) {
-                    unsubscribeRecords();
-                    unsubscribeRecords = null;
-                }
+            // Always clean up the previous user's listener.
+            unsubscribeRecords?.();
+            unsubscribeRecords = null;
 
+            if (!user) {
                 setIsSuperAdmin(false);
                 setCanEditRecords(false);
                 setRecords([]);
@@ -164,8 +234,12 @@ export default function WarrantyPage() {
                 return;
             }
 
-            // Check the user's active status and role.
+            setLoadingData(true);
+            setDataError("");
+
             try {
+                const isFixedSuperAdmin = user.uid === SUPER_ADMIN_UID;
+
                 const userSnapshot = await getDoc(
                     doc(db, "users", user.uid)
                 );
@@ -180,8 +254,8 @@ export default function WarrantyPage() {
                     .trim()
                     .toLowerCase();
 
-                const active = userData.active !== false;
-                const isFixedSuperAdmin = user.uid === SUPER_ADMIN_UID;
+                const active =
+                    userData.active === true || isFixedSuperAdmin;
 
                 const superAdmin =
                     isFixedSuperAdmin ||
@@ -189,121 +263,131 @@ export default function WarrantyPage() {
                         ["super admin", "superadmin"].includes(role));
 
                 const canEdit =
-                    isFixedSuperAdmin ||
-                    (active &&
-                        [
-                            "super admin",
-                            "superadmin",
-                            "admin",
-                            "editor",
-                        ].includes(role));
+                    superAdmin ||
+                    (active && ["admin", "editor"].includes(role));
 
                 setIsSuperAdmin(superAdmin);
                 setCanEditRecords(canEdit);
 
-                if (!canEdit) {
-                    setShowModal(false);
-                    setEditingId(null);
-                }
-            } catch (error) {
-                console.error("Warranty role check error:", error);
-
-                if (currentCheck !== authCheckId) return;
-
-                const isFixedSuperAdmin = user.uid === SUPER_ADMIN_UID;
-
-                // If the role check fails, do not grant edit access
-                // to ordinary users.
-                setIsSuperAdmin(isFixedSuperAdmin);
-                setCanEditRecords(isFixedSuperAdmin);
-                setShowModal(false);
-                setEditingId(null);
-            }
-
-            if (unsubscribeRecords) return;
-
-            setLoadingData(true);
-
-            unsubscribeRecords = onSnapshot(
-                collection(db, "it_devices"),
-                (snapshot) => {
-                    const warrantyRecords = snapshot.docs
-                        .map((document) => ({
-                            id: document.id,
-                            ...document.data(),
-                        }))
-                        .filter(
-                            (record) =>
-                                String(record.category || "").toLowerCase() ===
-                                    "it devices" &&
-                                String(record.type || "").toLowerCase() ===
-                                    "warranty"
-                        )
-                        .map((record) => {
-                            const endDate =
-                                record.endDate ?? record.expiryDate ?? "";
-
-                            return {
-                                ...record,
-                                productId:
-                                    record.productId ?? record.assetId ?? "",
-                                productName:
-                                    record.productName ??
-                                    record.product ??
-                                    record.item ??
-                                    "",
-                                priceWithoutGST:
-                                    record.priceWithoutGST ?? record.cost ?? "",
-                                gstPercent:
-                                    record.gstPercent ?? record.gst ?? "",
-                                user: record.user ?? "",
-                                department: record.department ?? "",
-                                purchaseDate:
-                                    record.purchaseDate ?? record.startDate ?? "",
-                                endDate,
-                                vendor:
-                                    record.vendor ??
-                                    record.supplier ??
-                                    record.company ??
-                                    "",
-                                warrantyClaim:
-                                    record.warrantyClaim ?? record.claim ?? "N",
-                                claimedDate: record.claimedDate ?? "",
-                                reasonForIssues: record.reasonForIssues ?? "",
-                                remarks: record.remarks ?? "",
-                                status: getStatus(endDate),
-                            };
-                        });
-
-                    warrantyRecords.sort((a, b) => {
-                        const dateA = a.endDate || "9999-12-31";
-                        const dateB = b.endDate || "9999-12-31";
-                        return dateA.localeCompare(dateB);
-                    });
-
-                    setRecords(warrantyRecords);
-                    setDataError("");
-                    setLoadingData(false);
-                },
-                (error) => {
-                    console.error("Warranty records error:", error);
+                if (!active) {
+                    setRecords([]);
                     setDataError(
-                        "Unable to load warranty records. Please check Firestore permissions."
+                        "Your account is inactive. Please contact the Super Admin."
                     );
                     setLoadingData(false);
+                    setShowModal(false);
+                    return;
                 }
-            );
+
+                unsubscribeRecords = onSnapshot(
+                    collection(db, "it_devices"),
+                    (snapshot) => {
+                        if (currentCheck !== authCheckId) return;
+
+                        const warrantyRecords = snapshot.docs
+                            .map((document) => ({
+                                id: document.id,
+                                ...document.data(),
+                            }))
+                            .filter(
+                                (record) =>
+                                    String(record.category || "").toLowerCase() ===
+                                    "it devices" &&
+                                    String(record.type || "").toLowerCase() ===
+                                    "warranty"
+                            )
+                            .map((record) => {
+                                const endDate =
+                                    record.endDate || record.expiryDate || "";
+
+                                const priceWithoutGST =
+                                    record.priceWithoutGST !== "" &&
+                                        record.priceWithoutGST != null
+                                        ? record.priceWithoutGST
+                                        : record.cost ?? "";
+
+                                const gstPercent =
+                                    record.gstPercent !== "" &&
+                                        record.gstPercent != null
+                                        ? record.gstPercent
+                                        : record.gst ?? "";
+
+                                return {
+                                    ...record,
+                                    productId:
+                                        record.productId || record.assetId || "",
+                                    productName:
+                                        record.productName ||
+                                        record.product ||
+                                        record.item ||
+                                        "",
+                                    priceWithoutGST,
+                                    gstPercent,
+                                    user: record.user || "",
+                                    department: record.department || "",
+                                    purchaseDate:
+                                        record.purchaseDate ||
+                                        record.startDate ||
+                                        "",
+                                    endDate,
+                                    vendor:
+                                        record.vendor ||
+                                        record.supplier ||
+                                        record.company ||
+                                        "",
+                                    warrantyClaim:
+                                        record.warrantyClaim ||
+                                        record.claim ||
+                                        "N",
+                                    claimedDate: record.claimedDate || "",
+                                    reasonForIssues:
+                                        record.reasonForIssues || "",
+                                    remarks: record.remarks || "",
+                                    status: getStatus(endDate),
+                                };
+                            });
+
+                        warrantyRecords.sort((a, b) => {
+                            const dateA = a.endDate || "9999-12-31";
+                            const dateB = b.endDate || "9999-12-31";
+                            return dateA.localeCompare(dateB);
+                        });
+
+                        setRecords(warrantyRecords);
+                        setDataError("");
+                        setLoadingData(false);
+                    },
+                    (error) => {
+                        if (currentCheck !== authCheckId) return;
+
+                        console.error("Warranty records error:", error);
+                        setDataError(
+                            "Unable to load warranty records. Please check Firestore permissions."
+                        );
+                        setLoadingData(false);
+                    }
+                );
+            } catch (error) {
+                if (currentCheck !== authCheckId) return;
+
+                console.error("Warranty role check error:", error);
+
+                setIsSuperAdmin(false);
+                setCanEditRecords(false);
+                setRecords([]);
+                setShowModal(false);
+                setDataError("User role could not be verified.");
+                setLoadingData(false);
+            }
         });
 
         return () => {
             authCheckId++;
             unsubscribeAuth();
-
-            if (unsubscribeRecords) {
-                unsubscribeRecords();
-            }
+            unsubscribeRecords?.();
         };
     }, [router]);
+
 
     const summary = useMemo(() => {
         const total = records.length;
@@ -405,6 +489,9 @@ export default function WarrantyPage() {
 
         setEditingId(null);
         setForm({ ...initialForm });
+        setSelectedDocument(null);
+        setExistingDocument(null);
+        setDocumentError("");
         setNotice("");
         setDataError("");
         setShowModal(true);
@@ -438,12 +525,105 @@ export default function WarrantyPage() {
             remarks: record.remarks || "",
         });
 
+        setExistingDocument(
+            record.documentData
+                ? {
+                    name: record.documentName || "Saved document",
+                    data: record.documentData,
+                    size: record.documentSize || 0,
+                    type: record.documentType || "",
+                }
+                : null
+        );
+
+        setSelectedDocument(null);
+        setDocumentError("");
         setEditingId(record.id);
         setNotice("");
         setDataError("");
         setShowModal(true);
     }
 
+    async function handleWarrantyDocumentChange(event) {
+        const input = event.target;
+        const file = input.files?.[0];
+
+        setDocumentError("");
+        setSelectedDocument(null);
+
+        if (!file) return;
+
+        const allowed = ["pdf", "jpg", "jpeg", "png", "doc", "docx"];
+        const extension = getDocumentExtension(file.name);
+
+        if (!allowed.includes(extension)) {
+            setDocumentError(
+                "Only PDF, JPG, PNG, DOC and DOCX files are allowed."
+            );
+            input.value = "";
+            return;
+        }
+
+        try {
+            const finalFile = await compressWarrantyImage(file);
+
+            if (finalFile.size > MAX_DOCUMENT_SIZE) {
+                setDocumentError(
+                    "File must be 500 KB or less after compression."
+                );
+                input.value = "";
+                return;
+            }
+
+            // Keep the selected document for Firestore saving.
+            setSelectedDocument(finalFile);
+
+            // OCR.Space supports PDF and image files, not DOC/DOCX.
+            if (!["pdf", "jpg", "jpeg", "png"].includes(extension)) {
+                setDocumentError(
+                    "Document selected successfully. OCR is available for PDF, JPG and PNG files only."
+                );
+                return;
+            }
+
+            setIsReadingDocument(true);
+
+            const rawText = await recognizeDocumentImage(finalFile);
+
+            console.log("WARRANTY OCR TEXT:", rawText);
+
+            const extracted = extractDocumentFields(
+                rawText,
+                input.form
+            );
+
+            setForm((previous) => {
+                const result = mergeExtractedFields(previous, extracted);
+                return result.form;
+            });
+
+            const extractedCount = Object.keys(extracted).length;
+
+            if (extractedCount > 0) {
+                setDocumentError(
+                    `Document read successfully. ${extractedCount} field(s) detected. Please verify the details.`
+                );
+            } else {
+                setDocumentError(
+                    "Document uploaded, but no matching warranty fields were detected. Please fill them manually."
+                );
+            }
+        } catch (error) {
+            console.error("Warranty OCR error:", error);
+
+            setDocumentError(
+                error.message ||
+                "Document selected, but OCR could not read it. Please fill the fields manually."
+            );
+        } finally {
+            setIsReadingDocument(false);
+        }
+    }
     async function handleSubmit(event) {
         event.preventDefault();
         setNotice("");
@@ -521,16 +701,42 @@ export default function WarrantyPage() {
             updatedAt: serverTimestamp(),
         };
 
+        let documentFields = {};
+
         try {
+            if (selectedDocument) {
+                documentFields = {
+                    documentData: await readWarrantyDocument(selectedDocument),
+                    documentName: selectedDocument.name,
+                    documentSize: selectedDocument.size,
+                    documentType: selectedDocument.type || "",
+                };
+            } else if (existingDocument?.data) {
+                documentFields = {
+                    documentData: existingDocument.data,
+                    documentName: existingDocument.name,
+                    documentSize: existingDocument.size || 0,
+                    documentType: existingDocument.type || "",
+                };
+            } else if (editingId) {
+                documentFields = {
+                    documentData: deleteField(),
+                    documentName: deleteField(),
+                    documentSize: deleteField(),
+                    documentType: deleteField(),
+                };
+            }
+
             if (editingId) {
-                await updateDoc(
-                    doc(db, "it_devices", editingId),
-                    recordData
-                );
+                await updateDoc(doc(db, "it_devices", editingId), {
+                    ...recordData,
+                    ...documentFields,
+                });
                 setNotice("Warranty record updated successfully.");
             } else {
                 await addDoc(collection(db, "it_devices"), {
                     ...recordData,
+                    ...documentFields,
                     createdAt: serverTimestamp(),
                 });
                 setNotice("Warranty record added successfully.");
@@ -539,6 +745,9 @@ export default function WarrantyPage() {
             setForm({ ...initialForm });
             setEditingId(null);
             setShowModal(false);
+            setSelectedDocument(null);
+            setExistingDocument(null);
+            setDocumentError("");
         } catch (error) {
             console.error("Unable to save warranty:", error);
             setNotice(
@@ -549,6 +758,10 @@ export default function WarrantyPage() {
         } finally {
             setSaving(false);
         }
+
+        return;
+
+
     }
 
     async function handleDelete(record) {
@@ -558,8 +771,7 @@ export default function WarrantyPage() {
         }
 
         const confirmed = window.confirm(
-            `Are you sure you want to delete "${
-                record.productName || "this warranty record"
+            `Are you sure you want to delete "${record.productName || "this warranty record"
             }"? This action cannot be undone.`
         );
 
@@ -634,7 +846,7 @@ export default function WarrantyPage() {
                         title="Total Warranty"
                         value={summary.total}
                         description="All warranty records"
-                        color={BLUE}
+                        color="#2563eb"
                     />
                     <SummaryCard
                         title="Active"
@@ -820,8 +1032,8 @@ export default function WarrantyPage() {
                                             </td>
                                             <td className="whitespace-nowrap px-4 py-4 text-slate-700">
                                                 {record.gstPercent !== "" &&
-                                                record.gstPercent !== null &&
-                                                record.gstPercent !== undefined
+                                                    record.gstPercent !== null &&
+                                                    record.gstPercent !== undefined
                                                     ? `${record.gstPercent}%`
                                                     : "—"}
                                             </td>
@@ -844,9 +1056,9 @@ export default function WarrantyPage() {
                                                 {record.warrantyClaim === "Y"
                                                     ? "Yes"
                                                     : record.warrantyClaim === "N" ||
-                                                      !record.warrantyClaim
-                                                    ? "No"
-                                                    : record.warrantyClaim}
+                                                        !record.warrantyClaim
+                                                        ? "No"
+                                                        : record.warrantyClaim}
                                             </td>
                                             <td className="whitespace-nowrap px-4 py-4 text-slate-700">
                                                 {formatDate(record.claimedDate)}
@@ -871,7 +1083,15 @@ export default function WarrantyPage() {
                                                             Edit
                                                         </button>
                                                     )}
-
+                                                    {record.documentData && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openWarrantyDocument(record.documentData)}
+                                                            className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                                                        >
+                                                            View Doc
+                                                        </button>
+                                                    )}
                                                     {isSuperAdmin && (
                                                         <button
                                                             type="button"
@@ -922,16 +1142,13 @@ export default function WarrantyPage() {
                         }
                     }}
                 >
-                    <div className="my-auto max-h-[94vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
-                        <div
-                            className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 text-white sm:px-7"
-                            style={{ backgroundColor: BLUE }}
-                        >
+                    <div className="my-auto max-h-[94vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+                        <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-5 py-4 sm:px-7">
                             <div>
-                                <h2 className="text-xl font-bold">
+                                <h2 className="text-xl font-bold text-slate-900">
                                     {editingId ? "Edit Warranty" : "Add Warranty"}
                                 </h2>
-                                <p className="mt-1 text-sm text-blue-100">
+                                <p className="mt-1 text-sm text-slate-500">
                                     Enter item and warranty details
                                 </p>
                             </div>
@@ -943,7 +1160,7 @@ export default function WarrantyPage() {
                                     setShowModal(false);
                                     setNotice("");
                                 }}
-                                className="rounded-lg px-3 py-2 text-xl hover:bg-white/10 disabled:opacity-50"
+                                className="rounded-lg px-3 py-2 text-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
                                 aria-label="Close form"
                             >
                                 ×
@@ -968,10 +1185,11 @@ export default function WarrantyPage() {
                                     Product ID
                                     <input
                                         name="productId"
+                                        data-ocr-aliases="Product ID\|Asset ID\|Serial Number\|Serial No\|Item Code"
                                         value={form.productId}
                                         onChange={updateForm}
                                         placeholder="Enter product ID"
-                                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal outline-none focus:border-blue-500"
+                                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:border-blue-500"
                                     />
                                 </label>
 
@@ -980,6 +1198,7 @@ export default function WarrantyPage() {
                                     <input
                                         required
                                         name="productName"
+                                        data-ocr-aliases="Item\|Product Name\|Item Description\|Product Description\|Model\|Equipment Name"
                                         value={form.productName}
                                         onChange={updateForm}
                                         placeholder="Enter item or product name"
@@ -994,6 +1213,7 @@ export default function WarrantyPage() {
                                         min="0"
                                         step="0.01"
                                         name="priceWithoutGST"
+                                        data-ocr-aliases="Price Without GST\|Basic Price\|Purchase Price\|Item Price\|Taxable Value"
                                         value={form.priceWithoutGST}
                                         onChange={updateForm}
                                         placeholder="Enter price"
@@ -1009,6 +1229,7 @@ export default function WarrantyPage() {
                                         max="100"
                                         step="0.01"
                                         name="gstPercent"
+                                        data-ocr-aliases="GST %\|GST Rate\|GST Percentage"
                                         value={form.gstPercent}
                                         onChange={updateForm}
                                         placeholder="Enter GST percentage"
@@ -1026,6 +1247,7 @@ export default function WarrantyPage() {
                                     User
                                     <input
                                         name="user"
+                                        data-ocr-aliases="User\|Assigned To\|Employee Name\|Allocated To"
                                         value={form.user}
                                         onChange={updateForm}
                                         placeholder="Enter user name"
@@ -1037,6 +1259,7 @@ export default function WarrantyPage() {
                                     Department
                                     <input
                                         name="department"
+                                        data-ocr-aliases="Department\|Dept"
                                         value={form.department}
                                         onChange={updateForm}
                                         placeholder="Enter department"
@@ -1056,6 +1279,7 @@ export default function WarrantyPage() {
                                         required
                                         type="date"
                                         name="purchaseDate"
+                                        data-ocr-aliases="Purchase Date\|Date of Purchase\|Invoice Date"
                                         value={form.purchaseDate}
                                         onChange={updateForm}
                                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal outline-none focus:border-blue-500"
@@ -1069,6 +1293,7 @@ export default function WarrantyPage() {
                                         type="date"
                                         min={form.purchaseDate || undefined}
                                         name="endDate"
+                                        data-ocr-aliases="Warranty Expired\|Warranty Expiry Date\|Warranty End Date\|Valid Until"
                                         value={form.endDate}
                                         onChange={updateForm}
                                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal outline-none focus:border-blue-500"
@@ -1080,6 +1305,7 @@ export default function WarrantyPage() {
                                     <input
                                         required
                                         name="vendor"
+                                        data-ocr-aliases="Supplier\|Vendor\|Dealer\|Seller\|Company"
                                         value={form.vendor}
                                         onChange={updateForm}
                                         placeholder="Enter vendor name"
@@ -1091,6 +1317,7 @@ export default function WarrantyPage() {
                                     Warranty Claim
                                     <select
                                         name="warrantyClaim"
+                                        data-ocr-aliases="Warranty Claim\|Claim Status"
                                         value={form.warrantyClaim}
                                         onChange={updateForm}
                                         className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal outline-none focus:border-blue-500"
@@ -1110,6 +1337,7 @@ export default function WarrantyPage() {
                                                 min={form.purchaseDate || undefined}
                                                 max={form.endDate || undefined}
                                                 name="claimedDate"
+                                                data-ocr-aliases="Claimed Date\|Claim Date"
                                                 value={form.claimedDate}
                                                 onChange={updateForm}
                                                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal outline-none focus:border-blue-500"
@@ -1120,6 +1348,7 @@ export default function WarrantyPage() {
                                             Reason for Issues
                                             <input
                                                 name="reasonForIssues"
+                                                data-ocr-aliases="Reason for Issues\|Issue Description\|Problem Description"
                                                 value={form.reasonForIssues}
                                                 onChange={updateForm}
                                                 placeholder="Enter issue or claim reason"
@@ -1140,6 +1369,97 @@ export default function WarrantyPage() {
                                         className="mt-1 w-full resize-y rounded-lg border border-slate-300 px-3 py-2.5 font-normal outline-none focus:border-blue-500"
                                     />
                                 </label>
+
+                                <div className="md:col-span-2 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+                                    <label className="block text-sm font-semibold text-slate-800">
+                                        Warranty Document (Optional)
+                                    </label>
+
+                                    <p className="mt-1 text-xs text-slate-500">
+                                        PDF, JPG, PNG, DOC or DOCX · Maximum 500 KB
+                                    </p>
+
+                                    {existingDocument && (
+                                        <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
+                                            <span className="min-w-0 flex-1 break-all text-sm text-slate-700">
+                                                {selectedDocument?.name || existingDocument.name}
+                                            </span>
+
+                                            {!selectedDocument && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openWarrantyDocument(existingDocument.data)}
+                                                    className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700"
+                                                >
+                                                    View
+                                                </button>
+                                            )}
+
+                                            <label className="inline-flex cursor-pointer items-center rounded-lg px-3 py-2 text-xs font-semibold text-white"
+                                                style={{ backgroundColor: BLUE }}
+                                            >
+                                                Replace
+                                                <input
+                                                    type="file"
+                                                    accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                                    onChange={handleWarrantyDocumentChange}
+                                                    className="sr-only"
+                                                />
+                                            </label>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setExistingDocument(null);
+                                                    setSelectedDocument(null);
+                                                }}
+                                                className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700"
+                                            >
+                                                Remove
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {!existingDocument && (
+                                        <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-lg border border-blue-200 bg-white p-3">
+                                            <span className="rounded-lg px-4 py-2 text-sm font-semibold text-white"
+                                                style={{ backgroundColor: BLUE }}
+                                            >
+                                                Choose Document
+                                            </span>
+
+                                            <span className="min-w-0 flex-1 break-all text-sm text-slate-500">
+                                                {selectedDocument?.name || "No file chosen"}
+                                            </span>
+
+                                            <input
+                                                type="file"
+                                                accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                                onChange={handleWarrantyDocumentChange}
+                                                className="sr-only"
+                                            />
+                                        </label>
+                                    )}
+
+                                    {selectedDocument && (
+                                        <p className="mt-2 text-xs text-emerald-700">
+                                            Selected: {selectedDocument.name} ·{" "}
+                                            {(selectedDocument.size / 1024).toFixed(1)} KB
+                                        </p>
+                                    )}
+
+                                    {isReadingDocument && (
+                                        <p className="mt-3 flex items-center gap-2 text-sm font-medium text-blue-700">
+                                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
+                                            Reading document and extracting warranty details...
+                                        </p>
+                                    )}
+                                    {documentError && (
+                                        <p className="mt-2 text-sm text-blue-700">
+                                            {documentError}
+                                        </p>
+                                    )}
+                                </div>
                             </div>
 
                             <div className="mt-7 flex flex-col-reverse gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:justify-end">
@@ -1150,15 +1470,15 @@ export default function WarrantyPage() {
                                         setShowModal(false);
                                         setNotice("");
                                     }}
-                                    className="rounded-lg border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                    className="rounded-lg border border-slate-300 px-5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                                 >
                                     Cancel
                                 </button>
 
                                 <button
                                     type="submit"
-                                    disabled={saving || !canEditRecords}
-                                    className="rounded-lg px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                                    disabled={saving || isReadingDocument || !canEditRecords}
+                                    className="rounded-lg px-6 py-2 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                                     style={{ backgroundColor: BLUE }}
                                 >
                                     {saving
@@ -1166,8 +1486,8 @@ export default function WarrantyPage() {
                                             ? "Updating..."
                                             : "Saving..."
                                         : editingId
-                                        ? "Update Warranty"
-                                        : "Save Warranty"}
+                                            ? "Update Warranty"
+                                            : "Save Warranty"}
                                 </button>
                             </div>
                         </form>

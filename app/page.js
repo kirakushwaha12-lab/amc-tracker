@@ -13,12 +13,10 @@ export default function Home() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
 
   async function handleLogin(event) {
     event.preventDefault();
     setError("");
-    setSuccess("");
     setLoading(true);
 
     try {
@@ -57,17 +55,25 @@ export default function Home() {
       <div className="pointer-events-none absolute -bottom-40 -right-20 h-96 w-96 rounded-full bg-cyan-500/15 blur-3xl" />
 
       <div className="relative grid w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl shadow-black/30 lg:grid-cols-2">
+
+        {/* Branding Section */}
         <section className="relative hidden flex-col justify-between overflow-hidden bg-gradient-to-br from-blue-950 via-slate-900 to-slate-950 p-10 text-white lg:flex xl:p-12">
           <div className="absolute -right-20 top-28 h-64 w-64 rounded-full border border-white/10" />
           <div className="absolute -right-10 top-38 h-44 w-44 rounded-full border border-white/10" />
 
-          <div className="relative">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/15 bg-white/10 text-lg font-bold tracking-wide">
-              AI
+          <div className="relative flex items-center gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/15 bg-white/10 text-lg font-bold tracking-wide">
+              AIL
             </div>
-            <p className="mt-5 text-sm font-medium tracking-[0.2em] text-blue-200">
-              AMIN INTERNATIONAL LTD.
-            </p>
+
+            <div>
+              <p className="text-sm font-semibold tracking-wide text-white">
+                AMIN INTERNATIONAL LIMITED
+              </p>
+              <p className="mt-1 text-xs font-medium text-blue-200">
+                Company Records &amp; Expiry Tracker
+              </p>
+            </div>
           </div>
 
           <div className="relative my-14">
@@ -75,12 +81,14 @@ export default function Home() {
               <span className="h-2 w-2 rounded-full bg-emerald-400" />
               Centralized tracking
             </div>
+
             <h1 className="max-w-md text-4xl font-semibold leading-tight tracking-tight xl:text-5xl">
               Stay ahead of every expiry.
             </h1>
+
             <p className="mt-5 max-w-md text-base leading-7 text-slate-300">
-              Keep AMC contracts, warranties and software
-              licenses organized in one place.
+              Manage AMC contracts, warranties, vehicle documents,
+              software licenses and compliance records in one place.
             </p>
 
             <div className="mt-9 space-y-4">
@@ -104,18 +112,22 @@ export default function Home() {
           </p>
         </section>
 
+        {/* Login Section */}
         <section className="flex items-center justify-center px-6 py-10 sm:px-10 sm:py-12 lg:px-12 xl:px-16">
           <div className="w-full max-w-md">
+
+            {/* Mobile Branding */}
             <div className="mb-9 flex items-center gap-3 lg:hidden">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-950 text-sm font-bold text-white">
-                AI
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-950 text-sm font-bold text-white">
+                AIL
               </div>
+
               <div>
                 <p className="text-sm font-bold tracking-wide text-slate-900">
-                  AMIN INTERNATIONAL LTD.
+                  AMIN INTERNATIONAL LIMITED
                 </p>
-                <p className="text-xs text-slate-500">
-                  AMC & License Tracker
+                <p className="mt-1 text-xs font-medium text-slate-500">
+                  Company Records &amp; Expiry Tracker
                 </p>
               </div>
             </div>
@@ -124,9 +136,11 @@ export default function Home() {
               <p className="text-sm font-semibold text-blue-700">
                 WELCOME BACK
               </p>
+
               <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
                 Sign in to your account
               </h2>
+
               <p className="mt-3 text-sm leading-6 text-slate-500">
                 Enter your company-authorized credentials to
                 access the tracking system.
@@ -141,6 +155,7 @@ export default function Home() {
                 >
                   Email address
                 </label>
+
                 <input
                   id="email"
                   type="email"
@@ -162,6 +177,7 @@ export default function Home() {
                     Password
                   </label>
                 </div>
+
                 <div className="relative">
                   <input
                     id="password"
@@ -173,6 +189,7 @@ export default function Home() {
                     placeholder="Enter your password"
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5 pr-20 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
                   />
+
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
@@ -189,15 +206,6 @@ export default function Home() {
                   className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-5 text-red-700"
                 >
                   {error}
-                </div>
-              )}
-
-              {success && (
-                <div
-                  role="status"
-                  className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-5 text-emerald-800"
-                >
-                  {success}
                 </div>
               )}
 
@@ -223,7 +231,7 @@ export default function Home() {
             </div>
 
             <p className="mt-8 text-center text-xs text-slate-400">
-              AMC · Warranty · Software License Management
+              AMC · Warranty · Insurance · Pollution · Compliance · Software License
             </p>
           </div>
         </section>

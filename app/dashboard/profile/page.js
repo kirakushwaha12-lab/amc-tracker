@@ -208,7 +208,7 @@ export default function ProfilePage() {
     return (
         <main className="min-h-screen bg-slate-100 p-4 sm:p-6 lg:p-8">
             <div className="mx-auto max-w-[1600px]">
-                
+
 
                 <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
                     <div>
@@ -227,7 +227,8 @@ export default function ProfilePage() {
                             setError("");
                             setSuccess("");
                         }}
-                        className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
+                        className="rounded-xl px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                        style={{ backgroundColor: "#0b4da2" }}
                     >
                         {showPasswordForm ? "Cancel" : "Change Password"}
                     </button>
@@ -306,7 +307,8 @@ export default function ProfilePage() {
                             <button
                                 type="submit"
                                 disabled={saving}
-                                className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                                className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                                style={{ backgroundColor: "#0b4da2" }}
                             >
                                 {saving ? "Saving..." : "Save Changes"}
                             </button>
@@ -378,15 +380,14 @@ export default function ProfilePage() {
                             <div className="flex flex-wrap gap-3 sm:col-span-2">
                                 <button
                                     type="submit"
-                                    disabled={changingPassword}
-                                    className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                                    disabled={saving}
+                                    className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                                    style={{ backgroundColor: "#0b4da2" }}
                                 >
-                                    {changingPassword
-                                        ? "Updating..."
-                                        : "Update Password"}
+                                    {saving ? "Saving..." : "Save Changes"}
                                 </button>
 
-                               
+
                             </div>
                         </form>
                     </section>
