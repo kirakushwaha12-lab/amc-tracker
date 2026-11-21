@@ -22,10 +22,10 @@ import {
     extractDocumentFields,
     mergeExtractedFields,
 } from "../../lib/document-ocr";
-
+import { renewRecord } from "../../lib/renewal-history";
+import RenewalHistory from "../../components/RenewalHistory";
 const BLUE = "#0b4da2";
 const COLLECTION_NAME = "vehicles";
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 
 const initialForm = {
     vehicleNo: "",
@@ -296,6 +296,9 @@ export default function PollutionPage() {
     const router = useRouter();
 
     const [records, setRecords] = useState([]);
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
@@ -323,6 +326,8 @@ export default function PollutionPage() {
     const [periodFilter, setPeriodFilter] = useState("All");
 
     const [editingId, setEditingId] = useState(null);
+    const [renewingId, setRenewingId] = useState(null);
+    const [showRenewalHistory, setShowRenewalHistory] = useState(false);
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
@@ -347,9 +352,6 @@ export default function PollutionPage() {
             }
 
             try {
-                const isProtectedSuperAdmin =
-                    user.uid === SUPER_ADMIN_UID;
-
                 const userSnapshot = await getDoc(
                     doc(db, "users", user.uid)
                 );
@@ -362,15 +364,10 @@ export default function PollutionPage() {
 
                 const role = String(userData.role ?? "")
                     .trim()
-                    .toLowerCase();
+                    .toLowerCase()
+                    .replace(/[\s_-]+/g, "");
 
-                const roleIsSuperAdmin =
-                    role === "super admin" ||
-                    role === "superadmin";
-
-                // Keep the existing test Super Admin protected.
-                const active =
-                    isProtectedSuperAdmin || userData.active !== false;
+                const active = userData.active === true;
 
                 if (!active) {
                     setIsSuperAdmin(false);
@@ -382,17 +379,14 @@ export default function PollutionPage() {
                     return;
                 }
 
-                const superAdmin =
-                    isProtectedSuperAdmin || roleIsSuperAdmin;
+                const superAdmin = role === "superadmin";
 
                 const editable =
                     superAdmin ||
-                    role === "admin" ||
-                    role === "editor";
+                    ["admin", "editor"].includes(role);
 
                 setIsSuperAdmin(superAdmin);
                 setCanEditRecords(editable);
-
                 unsubscribeRecords = onSnapshot(
                     collection(db, COLLECTION_NAME),
                     (snapshot) => {
@@ -453,7 +447,19 @@ export default function PollutionPage() {
             unsubscribeRecords?.();
         };
     }, [router]);
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
 
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
     const preparedRecords = useMemo(
         () =>
             records.map((record) => {
@@ -475,7 +481,7 @@ export default function PollutionPage() {
                     status: getStatus(expiryDate),
                 };
             }),
-        [records]
+        [records, todayKey]
     );
 
     const counts = useMemo(
@@ -702,6 +708,7 @@ export default function PollutionPage() {
         }
 
         setEditingId(null);
+        setRenewingId(null);
         setForm({ ...initialForm });
         setSelectedDocument(null);
         setExistingDocument(null);
@@ -720,6 +727,7 @@ export default function PollutionPage() {
         }
 
         setEditingId(record.id);
+        setRenewingId(null);
 
         setForm({
             vehicleNo: record.vehicleNo ?? "",
@@ -752,7 +760,47 @@ export default function PollutionPage() {
         setNotice("");
         setShowForm(true);
     }
+    function openRenewForm(record) {
+        if (!canEditRecords) {
+            setError("You do not have permission to renew Pollution records.");
+            return;
+        }
 
+        setEditingId(null);
+        setRenewingId(record.id);
+
+        setForm({
+            vehicleNo: record.vehicleNo ?? "",
+            certificateNo: "",
+            pucCode: "",
+            fuelType: record.fuelType ?? "",
+            registrationDate: record.registrationDate ?? "",
+            certificateDate: "",
+            expiryDate: "",
+            pucCentre: record.pucCentre ?? "",
+            amount: "",
+            remarks: "",
+        });
+
+        setSelectedDocument(null);
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    name: record.documentName || "Saved document",
+                    data: record.documentData,
+                    size: record.documentSize || 0,
+                    type: record.documentType || "",
+                }
+                : null
+        );
+
+        setFormError("");
+        setOcrStatus("");
+        setError("");
+        setNotice("");
+        setShowForm(true);
+    }
     function normalizeFuelType(value) {
         if (!value) return "";
 
@@ -838,7 +886,9 @@ export default function PollutionPage() {
             return;
         }
         const shouldRemoveDocument =
-            Boolean(editingId) && !selectedDocument && !existingDocument;
+            Boolean(editingId || renewingId) &&
+            !selectedDocument &&
+            !existingDocument;
         const recordData = {
             category: "Vehicles",
             type: "Pollution",
@@ -863,7 +913,23 @@ export default function PollutionPage() {
             recordData.documentType = deleteField();
         }
         try {
-            if (editingId) {
+            if (renewingId) {
+                await renewRecord({
+                    collectionName: COLLECTION_NAME,
+                    recordId: renewingId,
+                    moduleName: "Pollution",
+                    renewalData: recordData,
+                    actor: {
+                        uid: auth.currentUser?.uid || "",
+                        email: auth.currentUser?.email || "",
+                        displayName: auth.currentUser?.displayName || "",
+                    },
+                });
+
+                setNotice(
+                    "Pollution certificate renewed successfully. Previous details saved in Renewal History."
+                );
+            } else if (editingId) {
                 await updateDoc(
                     doc(db, COLLECTION_NAME, editingId),
                     recordData
@@ -871,10 +937,13 @@ export default function PollutionPage() {
 
                 setNotice("Pollution record updated successfully.");
             } else {
-                await addDoc(collection(db, COLLECTION_NAME), {
-                    ...recordData,
-                    createdAt: serverTimestamp(),
-                });
+                await addDoc(
+                    collection(db, COLLECTION_NAME),
+                    {
+                        ...recordData,
+                        createdAt: serverTimestamp(),
+                    }
+                );
 
                 setNotice("Pollution record saved successfully.");
             }
@@ -882,6 +951,7 @@ export default function PollutionPage() {
             setShowForm(false);
             setForm({ ...initialForm });
             setEditingId(null);
+            setRenewingId(null);
             setSelectedDocument(null);
             setExistingDocument(null);
             setFormError("");
@@ -893,9 +963,11 @@ export default function PollutionPage() {
             setFormError(
                 err.code === "permission-denied"
                     ? "Permission denied. Please check Firestore security rules."
-                    : editingId
-                        ? "Pollution record could not be updated. Please try again."
-                        : "Pollution record could not be saved. Please try again."
+                    : renewingId
+                        ? "Pollution certificate could not be renewed. Please try again."
+                        : editingId
+                            ? "Pollution record could not be updated. Please try again."
+                            : "Pollution record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -993,14 +1065,25 @@ export default function PollutionPage() {
                     </div>
 
                     {canEditRecords && (
-                        <button
-                            type="button"
-                            onClick={openAddForm}
-                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                            style={{ backgroundColor: BLUE }}
-                        >
-                            + Add Pollution Record
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Pollution Record
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setShowRenewalHistory(true)}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                Renewal History
+                            </button>
+                        </div>
                     )}
                 </div>
 
@@ -1195,7 +1278,16 @@ export default function PollutionPage() {
                                                             Edit
                                                         </button>
                                                     )}
-
+                                                    {canEditRecords && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openRenewForm(record)}
+                                                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                                                            style={{ backgroundColor: BLUE }}
+                                                        >
+                                                            Renew
+                                                        </button>
+                                                    )}
 
                                                     {record.documentData && (
                                                         <button
@@ -1283,9 +1375,11 @@ export default function PollutionPage() {
                         <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
                             <div>
                                 <h2 className="text-lg font-bold text-slate-900">
-                                    {editingId
-                                        ? "Edit Pollution Record"
-                                        : "Add Pollution Record"}
+                                    {renewingId
+                                        ? "Renew Pollution Certificate"
+                                        : editingId
+                                            ? "Edit Pollution Record"
+                                            : "Add Pollution Record"}
                                 </h2>
                                 <p className="mt-1 text-sm text-slate-500">
                                     Enter the vehicle and certificate details.
@@ -1297,6 +1391,11 @@ export default function PollutionPage() {
                                 onClick={() => {
                                     setShowForm(false);
                                     setFormError("");
+                                    setEditingId(null);
+                                    setRenewingId(null);
+                                    setSelectedDocument(null);
+                                    setExistingDocument(null);
+                                    setOcrStatus("");
                                 }}
                                 disabled={saving}
                                 className="rounded-lg px-3 py-2 text-xl text-slate-500 hover:bg-slate-100"
@@ -1586,6 +1685,11 @@ export default function PollutionPage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        setEditingId(null);
+                                        setRenewingId(null);
+                                        setSelectedDocument(null);
+                                        setExistingDocument(null);
+                                        setOcrStatus("");
                                     }}
                                     disabled={saving}
                                     className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700"
@@ -1600,17 +1704,27 @@ export default function PollutionPage() {
                                     style={{ backgroundColor: BLUE }}
                                 >
                                     {saving
-                                        ? editingId
-                                            ? "Updating..."
-                                            : "Saving..."
-                                        : editingId
-                                            ? "Update Record"
-                                            : "Save Record"}
+                                        ? renewingId
+                                            ? "Renewing..."
+                                            : editingId
+                                                ? "Updating..."
+                                                : "Saving..."
+                                        : renewingId
+                                            ? "Renew Certificate"
+                                            : editingId
+                                                ? "Update Record"
+                                                : "Save Record"}
                                 </button>
                             </div>
                         </form>
                     </div>
                 </div>
+            )}
+            {showRenewalHistory && (
+                <RenewalHistory
+                    moduleName="Pollution"
+                    onClose={() => setShowRenewalHistory(false)}
+                />
             )}
         </main>
     );

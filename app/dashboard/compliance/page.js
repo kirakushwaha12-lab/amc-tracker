@@ -17,10 +17,20 @@ import {
 } from "firebase/firestore";
 import imageCompression from "browser-image-compression";
 import { auth, db } from "../../../lib/firebase";
-
+import { renewRecord } from "../../lib/renewal-history";
+import RenewalHistory from "../../components/RenewalHistory";
 const BLUE = "#0b4da2";
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 const MAX_DOCUMENT_SIZE = 500 * 1024;
+
+const COMPLIANCE_TYPES = [
+    "Licences & Permissions",
+    "Certifications & Audits",
+    "Safety & Inspections",
+    "Environmental Monitoring",
+    "Agreements & Memberships",
+    "Vehicle Compliance",
+    "Other",
+];
 
 const ALLOWED_DOCUMENT_TYPES = [
     "application/pdf",
@@ -30,13 +40,22 @@ const ALLOWED_DOCUMENT_TYPES = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ];
 
-const ALLOWED_DOCUMENT_EXTENSIONS = ["pdf", "jpg", "jpeg", "png", "doc", "docx"];
+const ALLOWED_DOCUMENT_EXTENSIONS = [
+    "pdf",
+    "jpg",
+    "jpeg",
+    "png",
+    "doc",
+    "docx",
+];
 
 const initialForm = {
+    complianceType: "",
     examinationType: "",
     unit: "",
     examinationDate: "",
     validTill: "",
+    remarks: "",
 };
 
 function formatDate(value) {
@@ -205,6 +224,10 @@ export default function CompliancePage() {
     const router = useRouter();
 
     const [records, setRecords] = useState([]);
+
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
     const [loading, setLoading] = useState(true);
     const [userChecked, setUserChecked] = useState(false);
     const [error, setError] = useState("");
@@ -216,7 +239,11 @@ export default function CompliancePage() {
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState("All");
     const [periodFilter, setPeriodFilter] = useState("All");
+    const [complianceTypeFilter, setComplianceTypeFilter] = useState("All");
+    const [showComplianceTypeFilter, setShowComplianceTypeFilter] = useState(false);
     const [editingId, setEditingId] = useState(null);
+    const [renewingId, setRenewingId] = useState(null);
+    const [showRenewalHistory, setShowRenewalHistory] = useState(false);
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
@@ -245,16 +272,24 @@ export default function CompliancePage() {
             setError("");
 
             try {
-                const protectedSuperAdmin = user.uid === SUPER_ADMIN_UID;
+                const userSnapshot = await getDoc(
+                    doc(db, "users", user.uid)
+                );
 
-                const userSnapshot = await getDoc(doc(db, "users", user.uid));
+                if (cancelled) return;
+
                 const userData = userSnapshot.exists()
                     ? userSnapshot.data()
                     : {};
 
-                if (cancelled) return;
+                const role = String(userData.role ?? "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/[\s_-]+/g, "");
 
-                if (!protectedSuperAdmin && userData.active !== true) {
+                const active = userData.active === true;
+
+                if (!active) {
                     setRecords([]);
                     setLoading(false);
                     setCanEditRecords(false);
@@ -265,18 +300,9 @@ export default function CompliancePage() {
                     return;
                 }
 
-                const role = String(userData.role ?? "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/[\s_-]+/g, "");
-
-                const superAdmin =
-                    protectedSuperAdmin || role === "superadmin";
-
+                const superAdmin = role === "superadmin";
                 const canEdit =
-                    superAdmin ||
-                    role === "admin" ||
-                    role === "editor";
+                    superAdmin || ["admin", "editor"].includes(role);
 
                 setIsSuperAdmin(superAdmin);
                 setCanEditRecords(canEdit);
@@ -292,16 +318,25 @@ export default function CompliancePage() {
                             return {
                                 id: item.id,
                                 ...data,
+
+                                complianceType:
+                                    data.complianceType ??
+                                    data.complianceCategory ??
+                                    "",
+
                                 examinationType:
                                     data.examinationType ??
                                     data.typeOfExamination ??
                                     data.name ??
                                     "",
+
                                 unit: data.unit ?? "",
+
                                 examinationDate:
                                     data.examinationDate ??
                                     data.lastExaminationDate ??
                                     "",
+
                                 validTill:
                                     data.validTill ??
                                     data.validTillDate ??
@@ -318,7 +353,6 @@ export default function CompliancePage() {
                         });
 
                         setRecords(complianceRecords);
-
                         setError("");
                         setLoading(false);
                     },
@@ -351,15 +385,29 @@ export default function CompliancePage() {
             unsubscribeRecords?.();
         };
     }, [router]);
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
 
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
     const counts = useMemo(
         () => ({
             total: records.length,
             active: records.filter((r) => getStatus(r) === "Active").length,
-            expiring: records.filter((r) => getStatus(r) === "Expiring Soon").length,
+            expiring: records.filter(
+                (r) => getStatus(r) === "Expiring Soon"
+            ).length,
             expired: records.filter((r) => getStatus(r) === "Expired").length,
         }),
-        [records]
+        [records, todayKey]
     );
 
     const expiryOverview = useMemo(() => {
@@ -381,28 +429,25 @@ export default function CompliancePage() {
             if (days < 0) {
                 overdue++;
             } else {
-                if (days <= 10) {
-                    next10++;
-                }
-
-                if (days <= 30) {
-                    next30++;
-                }
+                if (days <= 10) next10++;
+                if (days <= 30) next30++;
             }
         });
 
         return { overdue, next10, next30 };
-    }, [records]);
+    }, [records, todayKey]);
 
     const filteredRecords = useMemo(() => {
         const term = search.trim().toLowerCase();
 
         return records.filter((record) => {
             const matchesSearch = [
+                record.complianceType,
                 record.examinationType,
                 record.unit,
                 record.examinationDate,
                 record.validTill,
+                record.remarks,
             ].some((value) =>
                 String(value || "").toLowerCase().includes(term)
             );
@@ -410,6 +455,14 @@ export default function CompliancePage() {
             const status = getStatus(record);
             const matchesStatus =
                 statusFilter === "All" || status === statusFilter;
+
+            const matchesComplianceType =
+                complianceTypeFilter === "All"
+                    ? true
+                    : complianceTypeFilter === "Other"
+                        ? !record.complianceType ||
+                        record.complianceType === "Other"
+                        : record.complianceType === complianceTypeFilter;
 
             let matchesPeriod = true;
 
@@ -425,19 +478,34 @@ export default function CompliancePage() {
                     if (Number.isNaN(expiry.getTime())) {
                         matchesPeriod = false;
                     } else {
-                        const days = Math.ceil((expiry - today) / 86400000);
+                        const days = Math.ceil(
+                            (expiry - today) / 86400000
+                        );
 
                         matchesPeriod =
                             periodFilter === "Expired"
                                 ? days < 0
-                                : days >= 0 && days <= Number(periodFilter);
+                                : days >= 0 &&
+                                days <= Number(periodFilter);
                     }
                 }
             }
 
-            return matchesSearch && matchesStatus && matchesPeriod;
+            return (
+                matchesSearch &&
+                matchesStatus &&
+                matchesPeriod &&
+                matchesComplianceType
+            );
         });
-    }, [records, search, statusFilter, periodFilter]);
+    }, [
+        records,
+        search,
+        statusFilter,
+        periodFilter,
+        complianceTypeFilter,
+        todayKey,
+    ]);
 
     function handleChange(event) {
         const { name, value } = event.target;
@@ -456,6 +524,7 @@ export default function CompliancePage() {
         }
 
         setEditingId(null);
+        setRenewingId(null);
         setForm({ ...initialForm });
         setFormError("");
         setError("");
@@ -471,11 +540,15 @@ export default function CompliancePage() {
         }
 
         setEditingId(record.id);
+        setRenewingId(null);
+
         setForm({
+            complianceType: record.complianceType ?? "",
             examinationType: record.examinationType ?? "",
             unit: record.unit ?? "",
             examinationDate: record.examinationDate ?? "",
             validTill: record.validTill ?? "",
+            remarks: record.remarks ?? "",
         });
 
         setExistingDocument(
@@ -495,7 +568,41 @@ export default function CompliancePage() {
         setNotice("");
         setShowForm(true);
     }
+    function openRenewForm(record) {
+        if (!canEditRecords) {
+            setError("You do not have permission to renew Compliance records.");
+            return;
+        }
 
+        setEditingId(null);
+        setRenewingId(record.id);
+
+        setForm({
+            complianceType: record.complianceType ?? "",
+            examinationType: record.examinationType ?? "",
+            unit: record.unit ?? "",
+            examinationDate: "",
+            validTill: "",
+            remarks: "",
+        });
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    name: record.documentName || "Saved document",
+                    data: record.documentData,
+                    size: record.documentSize || 0,
+                    type: record.documentType || "",
+                }
+                : null
+        );
+
+        setSelectedDocument(null);
+        setFormError("");
+        setError("");
+        setNotice("");
+        setShowForm(true);
+    }
     async function handleDocumentChange(event) {
         const input = event.target;
         const file = input.files?.[0];
@@ -558,18 +665,25 @@ export default function CompliancePage() {
             return;
         }
 
-        if (!form.examinationType.trim()) {
-            setFormError("Type of Examination is required.");
+        if (
+            !form.complianceType ||
+            !form.examinationType.trim() ||
+            !form.unit.trim() ||
+            !form.validTill
+        ) {
+            setFormError("Please fill in all required fields marked with *.");
             return;
         }
 
-        if (!form.validTill) {
-            setFormError("Valid Till date is required.");
+        if (!COMPLIANCE_TYPES.includes(form.complianceType)) {
+            setFormError("Please select a valid Compliance Type.");
             return;
         }
 
         if (form.examinationDate && form.examinationDate > form.validTill) {
-            setFormError("Examination Date cannot be after Valid Till.");
+            setFormError(
+                "Last Examination Date cannot be after Valid Till."
+            );
             return;
         }
 
@@ -579,10 +693,14 @@ export default function CompliancePage() {
             const recordData = {
                 category: "Compliance",
                 type: "Compliance",
+
+                complianceType: form.complianceType,
                 examinationType: form.examinationType.trim(),
                 unit: form.unit.trim(),
                 examinationDate: form.examinationDate,
                 validTill: form.validTill,
+                remarks: form.remarks.trim(),
+
                 updatedAt: serverTimestamp(),
             };
 
@@ -610,7 +728,7 @@ export default function CompliancePage() {
                     documentSize: existingDocument.size || 0,
                     documentType: existingDocument.type || "",
                 };
-            } else if (editingId) {
+            } else if (editingId || renewingId) {
                 documentFields = {
                     documentData: deleteField(),
                     documentName: deleteField(),
@@ -619,7 +737,26 @@ export default function CompliancePage() {
                 };
             }
 
-            if (editingId) {
+            if (renewingId) {
+                await renewRecord({
+                    collectionName: "compliance_records",
+                    recordId: renewingId,
+                    moduleName: "Compliance",
+                    renewalData: {
+                        ...recordData,
+                        ...documentFields,
+                    },
+                    actor: {
+                        uid: auth.currentUser?.uid || "",
+                        email: auth.currentUser?.email || "",
+                        displayName: auth.currentUser?.displayName || "",
+                    },
+                });
+
+                setNotice(
+                    "Compliance record renewed successfully. Previous details saved in Renewal History."
+                );
+            } else if (editingId) {
                 await updateDoc(
                     doc(db, "compliance_records", editingId),
                     {
@@ -641,6 +778,7 @@ export default function CompliancePage() {
 
             setForm({ ...initialForm });
             setEditingId(null);
+            setRenewingId(null);
             setShowForm(false);
             setFormError("");
             resetDocumentState();
@@ -652,7 +790,9 @@ export default function CompliancePage() {
                     ? "Permission denied. Please check Firestore security rules."
                     : err.code === "resource-exhausted"
                         ? "The document or record is too large for Firestore. Please choose a smaller document."
-                        : "Record could not be saved. Please try again."
+                        : renewingId
+                            ? "Compliance record could not be renewed. Please try again."
+                            : "Record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -666,7 +806,7 @@ export default function CompliancePage() {
         }
 
         const confirmed = window.confirm(
-            `Delete "${record.examinationType || "this record"}" for unit "${record.unit || "—"}"? This cannot be undone.`
+            `Delete "${record.examinationType || "this record"}" for Branch / Unit "${record.unit || "—"}"? This cannot be undone.`
         );
 
         if (!confirmed) return;
@@ -700,19 +840,29 @@ export default function CompliancePage() {
                             Compliance Management
                         </h1>
                         <p className="mt-2 text-sm text-slate-500">
-                            Track examination records and validity dates.
+                            Track compliance records and validity dates.
                         </p>
                     </div>
 
                     {canEditRecords && (
-                        <button
-                            type="button"
-                            onClick={openAddForm}
-                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                            style={{ backgroundColor: BLUE }}
-                        >
-                            + Add Record
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Compliance Record
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowRenewalHistory(true)}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                Renewal History
+                            </button>
+                        </div>
                     )}
                 </div>
 
@@ -757,12 +907,20 @@ export default function CompliancePage() {
                 </div>
 
                 <section className="mt-7 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <h2 className="text-lg font-bold text-slate-900">
-                        Expiry Overview
-                    </h2>
-                    <p className="mt-1 text-sm text-slate-500">
-                        Upcoming and overdue compliance records
-                    </p>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h2 className="text-lg font-bold text-slate-900">
+                                Expiry Overview
+                            </h2>
+                            <p className="mt-1 text-sm text-slate-500">
+                                Upcoming and overdue compliance records
+                            </p>
+                        </div>
+
+                        <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-medium text-slate-600">
+                            Based on Current Date
+                        </span>
+                    </div>
 
                     <div className="mt-5 grid gap-4 sm:grid-cols-3">
                         <div className="rounded-xl border border-red-100 bg-red-50 p-4">
@@ -773,6 +931,7 @@ export default function CompliancePage() {
                                 {expiryOverview.overdue}
                             </p>
                         </div>
+
                         <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
                             <p className="text-sm font-medium text-amber-700">
                                 Next 10 Days
@@ -781,6 +940,7 @@ export default function CompliancePage() {
                                 {expiryOverview.next10}
                             </p>
                         </div>
+
                         <div className="rounded-xl border border-blue-100 bg-blue-50 p-4">
                             <p className="text-sm font-medium text-blue-700">
                                 Next 30 Days
@@ -802,14 +962,30 @@ export default function CompliancePage() {
                         </p>
                     </div>
 
-                    <div className="grid gap-3 p-5 md:grid-cols-3">
+                    <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
                         <input
                             type="text"
                             value={search}
                             onChange={(event) => setSearch(event.target.value)}
-                            placeholder="Search examination, unit or date..."
+                            placeholder="Search type, examination, unit or date..."
                             className="rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
                         />
+
+                        <select
+                            value={complianceTypeFilter}
+                            onChange={(event) =>
+                                setComplianceTypeFilter(event.target.value)
+                            }
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500"
+                        >
+                            <option value="All">All Compliance Types</option>
+
+                            {COMPLIANCE_TYPES.map((type) => (
+                                <option key={type} value={type}>
+                                    {type}
+                                </option>
+                            ))}
+                        </select>
 
                         <select
                             value={periodFilter}
@@ -846,15 +1022,17 @@ export default function CompliancePage() {
                         </p>
                     ) : (
                         <div className="overflow-x-auto">
-                            <table className="w-full min-w-[1000px] text-left text-sm">
+                            <table className="w-full min-w-[1150px] text-left text-sm">
                                 <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                     <tr>
                                         {[
                                             "S. No.",
+                                            "Compliance Type",
                                             "Type of Examination",
-                                            "Unit",
-                                            "Examination Date",
+                                            "Branch / Unit",
+                                            "Last Examination Date",
                                             "Valid Till",
+                                            "Remarks",
                                             "Status",
                                             "Actions",
                                         ].map((heading) => (
@@ -880,37 +1058,71 @@ export default function CompliancePage() {
                                                 <td className="whitespace-nowrap px-4 py-4 text-slate-600">
                                                     {index + 1}
                                                 </td>
+
+                                                <td className="px-4 py-4 text-slate-700">
+                                                    {record.complianceType || (
+                                                        <span className="text-slate-400">
+                                                            Other
+                                                        </span>
+                                                    )}
+                                                </td>
+
                                                 <td className="px-4 py-4 font-medium text-slate-900">
                                                     {record.examinationType || "—"}
                                                 </td>
+
                                                 <td className="whitespace-nowrap px-4 py-4 text-slate-700">
                                                     {record.unit || "—"}
                                                 </td>
+
                                                 <td className="whitespace-nowrap px-4 py-4 text-slate-600">
                                                     {formatDate(record.examinationDate)}
                                                 </td>
+
                                                 <td className="whitespace-nowrap px-4 py-4 text-slate-600">
                                                     {formatDate(record.validTill)}
                                                 </td>
+
+                                                <td className="max-w-[220px] px-4 py-4 text-slate-600">
+                                                    <span title={record.remarks || ""}>
+                                                        {record.remarks || "—"}
+                                                    </span>
+                                                </td>
+
                                                 <td className="whitespace-nowrap px-4 py-4">
                                                     <StatusBadge status={status} />
                                                 </td>
+
                                                 <td className="whitespace-nowrap px-4 py-4">
                                                     <div className="flex items-center gap-2">
                                                         {canEditRecords && (
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => openEditForm(record)}
-                                                                className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50"
-                                                            >
-                                                                Edit
-                                                            </button>
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openEditForm(record)}
+                                                                    className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                                                >
+                                                                    Edit
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openRenewForm(record)}
+                                                                    className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                                                                    style={{ backgroundColor: BLUE }}
+                                                                >
+                                                                    Renew
+                                                                </button>
+                                                            </>
                                                         )}
 
                                                         {record.documentData && (
                                                             <button
                                                                 type="button"
-                                                                onClick={() => openSavedDocument(record.documentData)}
+                                                                onClick={() =>
+                                                                    openSavedDocument(
+                                                                        record.documentData
+                                                                    )
+                                                                }
                                                                 className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
                                                             >
                                                                 View Doc
@@ -920,8 +1132,12 @@ export default function CompliancePage() {
                                                         {isSuperAdmin && (
                                                             <button
                                                                 type="button"
-                                                                disabled={deletingId === record.id}
-                                                                onClick={() => handleDelete(record)}
+                                                                disabled={
+                                                                    deletingId === record.id
+                                                                }
+                                                                onClick={() =>
+                                                                    handleDelete(record)
+                                                                }
                                                                 className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
                                                             >
                                                                 {deletingId === record.id
@@ -930,11 +1146,12 @@ export default function CompliancePage() {
                                                             </button>
                                                         )}
 
-                                                        {!canEditRecords && !isSuperAdmin && (
-                                                            <span className="text-xs text-slate-400">
-                                                                View only
-                                                            </span>
-                                                        )}
+                                                        {!canEditRecords &&
+                                                            !isSuperAdmin && (
+                                                                <span className="text-xs text-slate-400">
+                                                                    View only
+                                                                </span>
+                                                            )}
                                                     </div>
                                                 </td>
                                             </tr>
@@ -944,7 +1161,7 @@ export default function CompliancePage() {
                                     {filteredRecords.length === 0 && (
                                         <tr>
                                             <td
-                                                colSpan={7}
+                                                colSpan={9}
                                                 className="px-5 py-12 text-center"
                                             >
                                                 <p className="font-medium text-slate-700">
@@ -972,12 +1189,14 @@ export default function CompliancePage() {
                             <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white p-5">
                                 <div>
                                     <h2 className="text-xl font-bold text-slate-900">
-                                        {editingId
-                                            ? "Edit Record"
-                                            : "Add Compliance Record"}
+                                        {renewingId
+                                            ? "Renew Compliance Record"
+                                            : editingId
+                                                ? "Edit Record"
+                                                : "Add Compliance Record"}
                                     </h2>
                                     <p className="mt-1 text-sm text-slate-500">
-                                        Enter the examination and validity details.
+                                        Enter the compliance and validity details.
                                     </p>
                                 </div>
 
@@ -987,6 +1206,8 @@ export default function CompliancePage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        setEditingId(null);
+                                        setRenewingId(null);
                                         resetDocumentState();
                                     }}
                                     className="rounded-lg px-3 py-2 text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
@@ -999,23 +1220,50 @@ export default function CompliancePage() {
                                 <div className="grid gap-4 p-6 sm:grid-cols-2">
                                     <div className="sm:col-span-2">
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                                            Compliance Type *
+                                        </label>
+
+                                        <select
+                                            required
+                                            name="complianceType"
+                                            value={form.complianceType}
+                                            onChange={handleChange}
+                                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500"
+                                        >
+                                            <option value="">
+                                                Select Compliance Type
+                                            </option>
+
+                                            {COMPLIANCE_TYPES.map((type) => (
+                                                <option key={type} value={type}>
+                                                    {type}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    <div className="sm:col-span-2">
+                                        <label className="mb-1.5 block text-sm font-medium text-slate-700">
                                             Type of Examination *
                                         </label>
+
                                         <input
                                             required
                                             name="examinationType"
                                             value={form.examinationType}
                                             onChange={handleChange}
-                                            placeholder="e.g. Factory License, Fire NOC"
+                                            placeholder="e.g. Factory License, Fire NOC, Drinking Water"
                                             className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
                                         />
                                     </div>
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Unit
+                                            Branch / Unit *
                                         </label>
+
                                         <input
+                                            required
                                             name="unit"
                                             value={form.unit}
                                             onChange={handleChange}
@@ -1026,8 +1274,9 @@ export default function CompliancePage() {
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Examination Date
+                                            Last Examination Date
                                         </label>
+
                                         <input
                                             type="date"
                                             name="examinationDate"
@@ -1041,6 +1290,7 @@ export default function CompliancePage() {
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
                                             Valid Till *
                                         </label>
+
                                         <input
                                             required
                                             type="date"
@@ -1075,7 +1325,9 @@ export default function CompliancePage() {
                                                     <button
                                                         type="button"
                                                         onClick={() =>
-                                                            openSavedDocument(existingDocument.data)
+                                                            openSavedDocument(
+                                                                existingDocument.data
+                                                            )
                                                         }
                                                         className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
                                                     >
@@ -1085,7 +1337,9 @@ export default function CompliancePage() {
 
                                                 <label
                                                     className="inline-flex cursor-pointer items-center rounded-lg px-3 py-2 text-xs font-semibold text-white transition hover:opacity-90"
-                                                    style={{ backgroundColor: BLUE }}
+                                                    style={{
+                                                        backgroundColor: BLUE,
+                                                    }}
                                                 >
                                                     Replace
                                                     <input
@@ -1113,7 +1367,9 @@ export default function CompliancePage() {
                                             <label className="mt-3 flex w-full cursor-pointer items-center gap-3 rounded-lg border border-blue-200 bg-white p-3 transition hover:border-blue-400 hover:bg-blue-50">
                                                 <span
                                                     className="inline-flex shrink-0 items-center rounded-lg px-4 py-2 text-sm font-semibold text-white"
-                                                    style={{ backgroundColor: BLUE }}
+                                                    style={{
+                                                        backgroundColor: BLUE,
+                                                    }}
                                                 >
                                                     Choose Document
                                                 </span>
@@ -1136,9 +1392,27 @@ export default function CompliancePage() {
                                         {selectedDocument && (
                                             <p className="mt-2 break-all text-xs text-emerald-700">
                                                 Selected: {selectedDocument.name} (
-                                                {formatDocumentSize(selectedDocument.size)})
+                                                {formatDocumentSize(
+                                                    selectedDocument.size
+                                                )}
+                                                )
                                             </p>
                                         )}
+                                    </div>
+
+                                    <div className="sm:col-span-2">
+                                        <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                                            Remarks
+                                        </label>
+
+                                        <textarea
+                                            name="remarks"
+                                            value={form.remarks}
+                                            onChange={handleChange}
+                                            rows={3}
+                                            placeholder="Enter any additional remarks"
+                                            className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
+                                        />
                                     </div>
 
                                     <div className="sm:col-span-2">
@@ -1161,6 +1435,8 @@ export default function CompliancePage() {
                                         onClick={() => {
                                             setShowForm(false);
                                             setFormError("");
+                                            setEditingId(null);
+                                            setRenewingId(null);
                                             resetDocumentState();
                                         }}
                                         className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
@@ -1175,17 +1451,27 @@ export default function CompliancePage() {
                                         style={{ backgroundColor: BLUE }}
                                     >
                                         {saving
-                                            ? editingId
-                                                ? "Updating..."
-                                                : "Saving..."
-                                            : editingId
-                                                ? "Update Record"
-                                                : "Save Record"}
+                                            ? renewingId
+                                                ? "Renewing..."
+                                                : editingId
+                                                    ? "Updating..."
+                                                    : "Saving..."
+                                            : renewingId
+                                                ? "Renew Record"
+                                                : editingId
+                                                    ? "Update Record"
+                                                    : "Save Record"}
                                     </button>
                                 </div>
                             </form>
                         </div>
                     </div>
+                )}
+                {showRenewalHistory && (
+                    <RenewalHistory
+                        moduleName="Compliance"
+                        onClose={() => setShowRenewalHistory(false)}
+                    />
                 )}
             </div>
         </main>

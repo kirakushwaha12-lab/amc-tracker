@@ -20,10 +20,6 @@ import { auth, db } from "../../lib/firebase";
 
 const DashboardShellContext = createContext(null);
 
-const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
-
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
-
 export function useDashboardShell() {
     const context = useContext(DashboardShellContext);
 
@@ -36,12 +32,13 @@ export function useDashboardShell() {
     return context;
 }
 
+// SIDEBAR NAVIGATION
 const navGroups = [
     {
         label: "",
         items: [
             { name: "Dashboard", path: "/dashboard", icon: "▦" },
-            { name: "Profile", path: "/dashboard/profile", icon: "⚙" },
+            { name: "Profile", path: "/dashboard/profile", icon: "♙" },
         ],
     },
     {
@@ -65,7 +62,13 @@ const navGroups = [
                 children: [
                     { name: "Insurance", path: "/dashboard/insurance" },
                     { name: "Pollution", path: "/dashboard/pollution" },
+                    { name: "Service", path: "/dashboard/service" },
                 ],
+            },
+            {
+                name: "Machinery",
+                path: "/dashboard/machinery",
+                icon: "⚙",
             },
             {
                 name: "Compliance",
@@ -78,7 +81,7 @@ const navGroups = [
         label: "MANAGEMENT",
         items: [
             { name: "Reports", path: "/dashboard/reports", icon: "▥" },
-            { name: "Users", path: "/dashboard/users", icon: "♙" },
+            { name: "Users", path: "/dashboard/users", icon: "♟" },
         ],
     },
 ];
@@ -92,23 +95,19 @@ function normalizeRole(value) {
 }
 
 function cleanReminderDays(value) {
-    if (!Array.isArray(value)) {
-        return DEFAULT_REMINDER_DAYS;
-    }
+    if (!Array.isArray(value)) return [];
 
-    const valid = value
-        .map(Number)
-        .filter(
-            (day) =>
-                Number.isInteger(day) &&
-                day >= 0 &&
-                day <= 365
-        );
-
-    return [...new Set([...valid, 0])]
-        .sort((a, b) => b - a);
+    return [...new Set(
+        value
+            .map(Number)
+            .filter(
+                (day) =>
+                    Number.isInteger(day) &&
+                    day >= 0 &&
+                    day <= 365
+            )
+    )].sort((a, b) => b - a);
 }
-
 function toDate(value) {
     if (!value) return null;
 
@@ -124,7 +123,10 @@ function toDate(value) {
         const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
 
         if (match) {
-            const [year, month, day] = match[1].split("-").map(Number);
+            const [year, month, day] = match[1]
+                .split("-")
+                .map(Number);
+
             return new Date(year, month - 1, day);
         }
 
@@ -147,45 +149,157 @@ function toDate(value) {
     return null;
 }
 
-function getExpiryDate(record, source) {
+// MODULE IDENTIFICATION
+function getModule(record, source) {
+    const type = normalizeRole(record.type);
+    const category = normalizeRole(record.category);
+    const values = `${type} ${category}`;
+
+    if (source === "vehicles") {
+        if (values.includes("pollution")) return "Pollution";
+        if (values.includes("service")) return "Service";
+        return "Insurance";
+    }
+
+    if (source === "machinery_records") {
+        return "Machinery";
+    }
+
+    if (source === "compliance_records") {
+        return "Compliance";
+    }
+
+    if (values.includes("warranty")) return "Warranty";
+    if (values.includes("software")) return "Software License";
+    if (values.includes("amc")) return "AMC";
+
+    return "IT Devices";
+}
+
+// NOTIFICATION DATE IDENTIFICATION
+// A record can have multiple reminder dates.
+function getNotificationDates(record, source) {
     const module = getModule(record, source);
 
-    let fields = [];
-
     if (module === "Insurance") {
-        fields = ["expiryDate"];
-    } else if (module === "Pollution") {
-        fields = ["expiryDate", "pollutionExpiryDate"];
-    } else if (module === "Compliance") {
-        fields = [
+        return [
+            {
+                date: toDate(record.expiryDate),
+                event: "Insurance Expiry",
+            },
+        ];
+    }
+
+    if (module === "Pollution") {
+        return [
+            {
+                date: toDate(
+                    record.expiryDate ||
+                    record.pollutionExpiryDate
+                ),
+                event: "Pollution Certificate Expiry",
+            },
+        ];
+    }
+
+    if (module === "Service") {
+        return [
+            {
+                date: toDate(record.nextServiceDueDate),
+                event: "Service Due",
+            },
+        ];
+    }
+
+    if (module === "Machinery") {
+        const entries = [];
+
+        const serviceDueDate =
+            record.nextDueDate || record.nextServiceDueDate;
+
+        if (serviceDueDate) {
+            entries.push({
+                date: toDate(serviceDueDate),
+                event: "Machinery Service Due",
+            });
+        }
+
+        if (
+            String(record.amcApplicable || "").trim().toLowerCase() === "yes" &&
+            record.amcEndDate
+        ) {
+            entries.push({
+                date: toDate(record.amcEndDate),
+                event: "Machinery AMC Expiry",
+            });
+        }
+
+        return entries;
+    }
+    if (module === "Compliance") {
+        const fields = [
             "validTill",
             "validUntil",
             "validTillDate",
             "expiryDate",
             "endDate",
         ];
-    } else if (module === "AMC") {
-        fields = ["endDate"];
-    } else if (module === "Warranty") {
-        fields = [
-            "warrantyExpiry",
-            "warrantyExpired",
+
+        const dateField = fields.find(
+            (field) => toDate(record[field])
+        );
+
+        return [
+            {
+                date: dateField ? toDate(record[dateField]) : null,
+                event: "Compliance Expiry",
+            },
+        ];
+    }
+
+    if (module === "AMC") {
+        return [
+            {
+                date: toDate(record.endDate || record.expiryDate),
+                event: "AMC Expiry",
+            },
+        ];
+    }
+
+    if (module === "Warranty") {
+        const fields = [
             "endDate",
             "expiryDate",
+            "warrantyExpiry",
+            "warrantyExpired",
         ];
-    } else if (module === "Software License") {
-        fields = ["expiryDate"];
-    } else {
-        fields = ["endDate", "expiryDate"];
+
+        const dateField = fields.find(
+            (field) => toDate(record[field])
+        );
+
+        return [
+            {
+                date: dateField ? toDate(record[dateField]) : null,
+                event: "Warranty Expiry",
+            },
+        ];
     }
 
-    for (const field of fields) {
-        const parsed = toDate(record[field]);
-
-        if (parsed) return parsed;
+    if (module === "Software License") {
+        return [
+            {
+                date: toDate(record.expiryDate || record.endDate),
+                event: "Software License Expiry",
+            },
+        ];
     }
-
-    return null;
+    return [
+        {
+            date: toDate(record.endDate || record.expiryDate),
+            event: "Record Expiry",
+        },
+    ];
 }
 
 function getDaysRemaining(date) {
@@ -202,9 +316,67 @@ function getDaysRemaining(date) {
     );
 }
 
-function getProductName(record) {
+function getProductName(record, source) {
+    const module = getModule(record, source);
+
+    if (module === "Machinery") {
+        return (
+            record.machineName ||
+            record.machineNo ||
+            record.machineNumber ||
+            "Unnamed Machinery"
+        );
+    }
+
+    if (module === "Service") {
+        return (
+            record.vehicleName ||
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            "Unnamed Vehicle"
+        );
+    }
+
+    if (module === "Software License") {
+        return (
+            record.licenseName ||
+            record.softwareName ||
+            record.productName ||
+            record.name ||
+            "Unnamed Software License"
+        );
+    }
+
+    if (module === "Compliance") {
+        return (
+            record.examinationType ||
+            record.typeOfExamination ||
+            record.name ||
+            "Unnamed Compliance Record"
+        );
+    }
+
+    if (module === "Pollution") {
+        return (
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productName ||
+            "Unnamed Vehicle"
+        );
+    }
+
+    if (module === "Insurance") {
+        return (
+            record.productName ||
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productId ||
+            record.policyNo ||
+            "Unnamed Insurance Record"
+        );
+    }
+
     return (
-        record.examinationType ||
         record.productName ||
         record.product ||
         record.item ||
@@ -216,31 +388,20 @@ function getProductName(record) {
         "Unnamed Record"
     );
 }
-
-function getModule(record, source) {
-    if (source === "vehicles") {
-        const type = normalizeRole(
-            record.type || record.category
-        );
-
-        if (type.includes("pollution")) return "Pollution";
-
-        return "Insurance";
+function getNotificationTitle(daysRemaining, event) {
+    if (daysRemaining < 0) {
+        return `${event} - Overdue`;
     }
 
-    if (source === "compliance_records") {
-        return "Compliance";
+    if (daysRemaining === 0) {
+        return `${event} - Due Today`;
     }
 
-    const type = normalizeRole(
-        record.type || record.category
-    );
+    if (daysRemaining === 1) {
+        return `${event} - Due Tomorrow`;
+    }
 
-    if (type.includes("warranty")) return "Warranty";
-    if (type.includes("software")) return "Software License";
-    if (type.includes("amc")) return "AMC";
-
-    return "IT Devices";
+    return `Upcoming ${event}`;
 }
 
 export default function DashboardLayout({ children }) {
@@ -259,9 +420,9 @@ export default function DashboardLayout({ children }) {
     const [loadingData, setLoadingData] = useState(true);
     const [dataError, setDataError] = useState("");
     const [readNotificationIds, setReadNotificationIds] = useState([]);
-    const [reminderDays, setReminderDays] = useState(
-        DEFAULT_REMINDER_DAYS
-    );
+
+    const [reminderDays, setReminderDays] = useState([]);
+
     const [todayKey, setTodayKey] = useState(() =>
         new Date().toDateString()
     );
@@ -271,109 +432,121 @@ export default function DashboardLayout({ children }) {
         Vehicles: true,
     });
 
-    // Authentication and live active-user verification.
+    // AUTHENTICATION AND ACTIVE USER VERIFICATION
     useEffect(() => {
         let cancelled = false;
         let authCheckId = 0;
         let unsubscribeProfile;
 
-        const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
-            const checkId = ++authCheckId;
+        const unsubscribeAuth = onAuthStateChanged(
+            auth,
+            (currentUser) => {
+                const checkId = ++authCheckId;
 
-            // Remove the previous user's profile listener.
-            if (unsubscribeProfile) {
-                unsubscribeProfile();
-                unsubscribeProfile = undefined;
-            }
-
-            if (cancelled) return;
-
-            setUser(currentUser);
-            setCheckingAuth(true);
-
-            if (!currentUser) {
-                setUserRole("");
-                setUser(null);
-                setCheckingAuth(false);
-                router.replace("/");
-                return;
-            }
-
-            unsubscribeProfile = onSnapshot(
-                doc(db, "users", currentUser.uid),
-
-                async (snapshot) => {
-                    if (cancelled || checkId !== authCheckId) return;
-
-                    const profile = snapshot.exists()
-                        ? snapshot.data()
-                        : null;
-
-                    const profileRole = normalizeRole(profile?.role);
-
-                    const allowedRoles = [
-                        "super admin",
-                        "superadmin",
-                        "admin",
-                        "editor",
-                        "viewer",
-                    ];
-
-                    const isFixedSuperAdmin =
-                        currentUser.uid === SUPER_ADMIN_UID;
-
-                    const validProfile =
-                        profile !== null &&
-                        profile.active === true &&
-                        allowedRoles.includes(profileRole);
-
-                    const validSuperAdmin =
-                        !isFixedSuperAdmin ||
-                        ["super admin", "superadmin"].includes(profileRole);
-
-                    if (!validProfile || !validSuperAdmin) {
-                        setUserRole("");
-                        setUser(null);
-                        setCheckingAuth(false);
-
-                        if (unsubscribeProfile) {
-                            unsubscribeProfile();
-                            unsubscribeProfile = undefined;
-                        }
-
-                        try {
-                            await signOut(auth);
-                        } catch (signOutError) {
-                            console.error(
-                                "Unable to sign out invalid user:",
-                                signOutError
-                            );
-                        }
-
-                        if (!cancelled && checkId === authCheckId) {
-                            router.replace("/");
-                        }
-
-                        return;
-                    }
-
-                    setUserRole(String(profile.role).trim());
-                    setCheckingAuth(false);
-                },
-
-                (error) => {
-                    console.error(
-                        "Unable to verify user access:",
-                        error
-                    );
-
-                    if (cancelled || checkId !== authCheckId) return;
-
-                    // Keep the current session during temporary Firestore errors.
-                    setCheckingAuth(false);
+                if (unsubscribeProfile) {
+                    unsubscribeProfile();
+                    unsubscribeProfile = undefined;
                 }
-            );
-        });
+
+                if (cancelled) return;
+
+                setUser(currentUser);
+                setCheckingAuth(true);
+
+                if (!currentUser) {
+                    setUserRole("");
+                    setUser(null);
+                    setCheckingAuth(false);
+                    router.replace("/");
+                    return;
+                }
+
+                unsubscribeProfile = onSnapshot(
+                    doc(db, "users", currentUser.uid),
+
+                    async (snapshot) => {
+                        if (
+                            cancelled ||
+                            checkId !== authCheckId
+                        ) {
+                            return;
+                        }
+
+                        const profile = snapshot.exists()
+                            ? snapshot.data()
+                            : null;
+
+                        const profileRole = normalizeRole(
+                            profile?.role
+                        );
+
+                        const allowedRoles = [
+                            "super admin",
+                            "superadmin",
+                            "admin",
+                            "editor",
+                            "viewer",
+                        ];
+
+                        const validProfile =
+                            profile !== null &&
+                            profile.active === true &&
+                            allowedRoles.includes(profileRole);
+
+                        if (!validProfile) {
+                            setUserRole("");
+                            setUser(null);
+                            setCheckingAuth(false);
+
+                            if (unsubscribeProfile) {
+                                unsubscribeProfile();
+                                unsubscribeProfile = undefined;
+                            }
+
+                            try {
+                                await signOut(auth);
+                            } catch (signOutError) {
+                                console.error(
+                                    "Unable to sign out invalid user:",
+                                    signOutError
+                                );
+                            }
+
+                            if (
+                                !cancelled &&
+                                checkId === authCheckId
+                            ) {
+                                router.replace("/");
+                            }
+
+                            return;
+                        }
+
+                        setUserRole(
+                            String(profile.role).trim()
+                        );
+
+                        setCheckingAuth(false);
+                    },
+
+                    (error) => {
+                        console.error(
+                            "Unable to verify user access:",
+                            error
+                        );
+
+                        if (
+                            cancelled ||
+                            checkId !== authCheckId
+                        ) {
+                            return;
+                        }
+
+                        setCheckingAuth(false);
+                    }
+                );
+            }
+        );
 
         return () => {
             cancelled = true;
@@ -387,8 +560,7 @@ export default function DashboardLayout({ children }) {
         };
     }, [router]);
 
-    // Load read notification IDs.
-    // Load read notification IDs separately for each user.
+    // LOAD READ NOTIFICATION IDS
     useEffect(() => {
         if (!user?.uid) {
             setReadNotificationIds([]);
@@ -417,18 +589,14 @@ export default function DashboardLayout({ children }) {
         }
     }, [user?.uid]);
 
-    // Listen to dynamic reminder settings.
+
+    // DYNAMIC REMINDER SETTINGS - COMMON FOR ALL ROLES
     useEffect(() => {
         if (checkingAuth || !user) return;
 
-        // Editors use the default reminder intervals.
-        if (normalizeRole(userRole) === "editor") {
-            setReminderDays(DEFAULT_REMINDER_DAYS);
-            return;
-        }
-
         const unsubscribe = onSnapshot(
             doc(db, "app_settings", "expiryReminders"),
+
             (snapshot) => {
                 const settings = snapshot.exists()
                     ? snapshot.data()
@@ -438,20 +606,23 @@ export default function DashboardLayout({ children }) {
                     cleanReminderDays(settings.reminderDays)
                 );
             },
+
             (error) => {
                 console.error(
                     "Unable to load dynamic reminder settings:",
                     error
                 );
 
-                setReminderDays(DEFAULT_REMINDER_DAYS);
+                setReminderDays([]);
             }
         );
 
         return () => unsubscribe();
-    }, [user, userRole, checkingAuth]);
+    }, [user, checkingAuth]);
 
-    // All verified active roles can view records and receive bell notifications.
+    // LOAD ALL MODULE RECORDS
+    // Machinery has its own collection.
+    // Service uses the existing vehicles collection.
     useEffect(() => {
         if (checkingAuth || !user) {
             setRecords([]);
@@ -466,6 +637,7 @@ export default function DashboardLayout({ children }) {
             "it_devices",
             "vehicles",
             "compliance_records",
+            "machinery_records",
         ];
 
         const snapshots = {};
@@ -474,12 +646,15 @@ export default function DashboardLayout({ children }) {
         const unsubscribers = sources.map((source) =>
             onSnapshot(
                 collection(db, source),
+
                 (snapshot) => {
-                    snapshots[source] = snapshot.docs.map((item) => ({
-                        ...item.data(),
-                        id: item.id,
-                        _source: source,
-                    }));
+                    snapshots[source] = snapshot.docs.map(
+                        (item) => ({
+                            ...item.data(),
+                            id: item.id,
+                            _source: source,
+                        })
+                    );
 
                     receivedSources.add(source);
 
@@ -489,10 +664,13 @@ export default function DashboardLayout({ children }) {
 
                     setRecords(combined);
 
-                    if (receivedSources.size === sources.length) {
+                    if (
+                        receivedSources.size === sources.length
+                    ) {
                         setLoadingData(false);
                     }
                 },
+
                 (error) => {
                     console.error(
                         `Unable to load ${source}:`,
@@ -505,7 +683,9 @@ export default function DashboardLayout({ children }) {
 
                     receivedSources.add(source);
 
-                    if (receivedSources.size === sources.length) {
+                    if (
+                        receivedSources.size === sources.length
+                    ) {
                         setLoadingData(false);
                     }
                 }
@@ -513,16 +693,20 @@ export default function DashboardLayout({ children }) {
         );
 
         return () => {
-            unsubscribers.forEach((unsubscribe) => unsubscribe());
+            unsubscribers.forEach(
+                (unsubscribe) => unsubscribe()
+            );
         };
     }, [user, checkingAuth]);
+
+    // CLOSE MOBILE MENU ON NAVIGATION
     useEffect(() => {
         setMobileMenuOpen(false);
         setShowNotifications(false);
         setNotice("");
     }, [pathname]);
 
-    // Refresh expiry calculations automatically at local midnight.
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
     useEffect(() => {
         const now = new Date();
         const nextMidnight = new Date(now);
@@ -536,57 +720,65 @@ export default function DashboardLayout({ children }) {
         return () => window.clearTimeout(timeout);
     }, [todayKey]);
 
-    // Notifications follow the configured reminder days.
+    // NOTIFICATIONS
+    // Upcoming reminders follow configured days.
     // Overdue records always remain visible.
     const notifications = useMemo(() => {
         return records
-            .map((record) => {
+            .flatMap((record) => {
                 const source = record._source;
-                const expiryDate = getExpiryDate(record, source);
-                const daysRemaining = getDaysRemaining(expiryDate);
+                const module = getModule(record, source);
 
-                if (daysRemaining === null) return null;
+                const dateEntries = getNotificationDates(
+                    record,
+                    source
+                );
 
-                const shouldNotify =
-                    daysRemaining < 0 ||
-                    reminderDays.includes(daysRemaining);
+                return dateEntries.map((entry, index) => {
+                    const date = entry.date;
 
-                if (!shouldNotify) return null;
+                    const daysRemaining = getDaysRemaining(date);
 
-                let type;
-                let title;
+                    if (daysRemaining === null) return null;
 
-                if (daysRemaining < 0) {
-                    type = "expired";
-                    title = "Record Expired";
-                } else if (daysRemaining === 0) {
-                    type = "today";
-                    title = "Expires Today";
-                } else if (daysRemaining === 1) {
-                    type = "1day";
-                    title = "Expires Tomorrow";
-                } else {
-                    type = `${daysRemaining}day`;
-                    title = "Upcoming Expiry";
-                }
+                    const shouldNotify =
+                        daysRemaining <= 0 ||
+                        reminderDays.includes(daysRemaining);
 
-                return {
-                    id: `${source}-${record.id}-${type}`,
-                    title,
-                    productName: getProductName(record),
-                    module: getModule(record, source),
-                    daysRemaining,
-                    expiryDate,
-                };
+                    if (!shouldNotify) return null;
+
+                    const event = entry.event;
+
+                    return {
+                        id: `${source}-${record.id}-${index}-${event}-${daysRemaining}`,
+                        title: getNotificationTitle(
+                            daysRemaining,
+                            event
+                        ),
+                        productName: getProductName(
+                            record,
+                            source
+                        ),
+                        module,
+                        event,
+                        daysRemaining,
+                        expiryDate: date,
+                    };
+                });
             })
             .filter(Boolean)
-            .sort((a, b) => a.daysRemaining - b.daysRemaining);
+            .sort(
+                (a, b) =>
+                    a.daysRemaining - b.daysRemaining
+            );
     }, [records, reminderDays, todayKey]);
 
     const unreadNotificationCount = notifications.filter(
-        (item) => !readNotificationIds.includes(item.id)
+        (item) =>
+            !readNotificationIds.includes(item.id)
     ).length;
 
+    // SAVE READ NOTIFICATION IDS
     const saveReadIds = useCallback(
         (ids) => {
             if (!user?.uid) return;
@@ -611,7 +803,10 @@ export default function DashboardLayout({ children }) {
     const markNotificationRead = useCallback(
         (id) => {
             if (!readNotificationIds.includes(id)) {
-                saveReadIds([...readNotificationIds, id]);
+                saveReadIds([
+                    ...readNotificationIds,
+                    id,
+                ]);
             }
         },
         [readNotificationIds, saveReadIds]
@@ -624,8 +819,13 @@ export default function DashboardLayout({ children }) {
                 ...notifications.map((item) => item.id),
             ]),
         ]);
-    }, [readNotificationIds, notifications, saveReadIds]);
+    }, [
+        readNotificationIds,
+        notifications,
+        saveReadIds,
+    ]);
 
+    // LOGOUT
     async function handleLogout() {
         setSigningOut(true);
 
@@ -634,7 +834,9 @@ export default function DashboardLayout({ children }) {
             router.replace("/");
         } catch (error) {
             console.error("Sign-out error:", error);
-            setNotice("Unable to sign out. Please try again.");
+            setNotice(
+                "Unable to sign out. Please try again."
+            );
             setSigningOut(false);
         }
     }
@@ -651,9 +853,9 @@ export default function DashboardLayout({ children }) {
 
     const isSuperAdmin =
         ["super admin", "superadmin"].includes(role);
+
     const canManageUsers =
         isSuperAdmin || role === "admin";
-
 
     const shellValue = {
         search,
@@ -661,6 +863,7 @@ export default function DashboardLayout({ children }) {
         records,
         loadingData,
         dataError,
+        reminderDays,
         notifications,
         unreadNotificationCount,
         markNotificationRead,
@@ -678,7 +881,11 @@ export default function DashboardLayout({ children }) {
                         <div className="flex min-w-0 items-center gap-3">
                             <button
                                 type="button"
-                                onClick={() => setMobileMenuOpen((value) => !value)}
+                                onClick={() =>
+                                    setMobileMenuOpen(
+                                        (value) => !value
+                                    )
+                                }
                                 className="rounded-xl border border-white/15 bg-white/10 p-2.5 text-lg transition hover:bg-white/20 lg:hidden"
                                 aria-label="Toggle navigation"
                                 aria-expanded={mobileMenuOpen}
@@ -694,6 +901,7 @@ export default function DashboardLayout({ children }) {
                                 <h1 className="truncate text-sm font-semibold tracking-wide sm:text-base">
                                     AMIN INTERNATIONAL LIMITED
                                 </h1>
+
                                 <p className="mt-1 truncate text-xs font-medium text-blue-200">
                                     Company Records &amp; Expiry Tracker
                                 </p>
@@ -704,14 +912,20 @@ export default function DashboardLayout({ children }) {
 
                             {/* SEARCH */}
                             <div className="hidden items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 py-2.5 md:flex">
-                                <span className="text-lg text-blue-200">⌕</span>
+                                <span className="text-lg text-blue-200">
+                                    ⌕
+                                </span>
+
                                 <input
                                     aria-label="Search records"
                                     placeholder="Search records..."
                                     value={search}
-                                    onChange={(event) => setSearch(event.target.value)}
+                                    onChange={(event) =>
+                                        setSearch(event.target.value)
+                                    }
                                     className="w-32 bg-transparent text-sm text-white outline-none placeholder:text-slate-400 lg:w-44"
                                 />
+
                                 {search && (
                                     <button
                                         type="button"
@@ -728,33 +942,45 @@ export default function DashboardLayout({ children }) {
                             <div className="relative">
                                 <button
                                     type="button"
-                                    onClick={() => setShowNotifications((value) => !value)}
+                                    onClick={() =>
+                                        setShowNotifications(
+                                            (value) => !value
+                                        )
+                                    }
                                     className="relative rounded-xl border border-white/15 bg-white/10 p-2.5 text-lg transition hover:bg-white/20"
                                     aria-label="Notifications"
                                     title="Notifications"
                                 >
                                     🔔
+
                                     {unreadNotificationCount > 0 && (
                                         <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white">
-                                            {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
+                                            {unreadNotificationCount > 99
+                                                ? "99+"
+                                                : unreadNotificationCount}
                                         </span>
                                     )}
                                 </button>
 
                                 {showNotifications && (
                                     <div className="absolute right-0 top-12 z-50 w-[min(90vw,360px)] overflow-hidden rounded-xl border border-slate-200 bg-white text-slate-900 shadow-2xl">
+
                                         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
                                             <div>
                                                 <p className="text-sm font-semibold">
-                                                    Expiry Notifications
+                                                    Expiry &amp; Due Notifications
                                                 </p>
+
                                                 <p className="text-xs text-slate-500">
                                                     {unreadNotificationCount} unread
                                                 </p>
                                             </div>
+
                                             <button
                                                 type="button"
-                                                onClick={markAllNotificationsRead}
+                                                onClick={
+                                                    markAllNotificationsRead
+                                                }
                                                 className="text-xs font-semibold text-blue-700 hover:text-blue-800 hover:underline"
                                             >
                                                 Mark all read
@@ -764,31 +990,43 @@ export default function DashboardLayout({ children }) {
                                         <div className="max-h-[360px] overflow-y-auto">
                                             {notifications.length === 0 ? (
                                                 <p className="px-4 py-8 text-center text-sm text-slate-500">
-                                                    No expiry alerts at the moment.
+                                                    No expiry or service alerts at the moment.
                                                 </p>
                                             ) : (
                                                 notifications.map((item) => {
-                                                    const isRead = readNotificationIds.includes(item.id);
+                                                    const isRead =
+                                                        readNotificationIds.includes(
+                                                            item.id
+                                                        );
 
                                                     return (
                                                         <button
                                                             type="button"
                                                             key={item.id}
-                                                            onClick={() => markNotificationRead(item.id)}
-                                                            className={`block w-full border-b border-slate-100 px-4 py-3 text-left transition hover:bg-slate-50 ${isRead ? "bg-white" : "bg-blue-50/70"
+                                                            onClick={() =>
+                                                                markNotificationRead(
+                                                                    item.id
+                                                                )
+                                                            }
+                                                            className={`block w-full border-b border-slate-100 px-4 py-3 text-left transition hover:bg-slate-50 ${isRead
+                                                                ? "bg-white"
+                                                                : "bg-blue-50/70"
                                                                 }`}
                                                         >
                                                             <div className="flex items-start justify-between gap-3">
                                                                 <p className="text-sm font-semibold text-slate-800">
                                                                     {item.title}
                                                                 </p>
+
                                                                 {!isRead && (
                                                                     <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-blue-700" />
                                                                 )}
                                                             </div>
+
                                                             <p className="mt-1 text-sm text-slate-700">
                                                                 {item.productName}
                                                             </p>
+
                                                             <p className="mt-1 text-xs text-slate-500">
                                                                 {item.module}
                                                                 {" · "}
@@ -812,6 +1050,7 @@ export default function DashboardLayout({ children }) {
                                 <p className="truncate text-sm font-semibold text-white">
                                     {userRole || "User"}
                                 </p>
+
                                 <p className="truncate text-xs text-blue-200">
                                     {user.email}
                                 </p>
@@ -824,7 +1063,9 @@ export default function DashboardLayout({ children }) {
                                 disabled={signingOut}
                                 className="rounded-xl bg-[#1d4ed8] px-3 py-2.5 text-xs font-semibold text-white shadow-lg shadow-blue-950/20 transition hover:bg-[#083b7d] disabled:cursor-not-allowed disabled:opacity-60 sm:px-4"
                             >
-                                {signingOut ? "Signing out..." : "Sign out"}
+                                {signingOut
+                                    ? "Signing out..."
+                                    : "Sign out"}
                             </button>
                         </div>
                     </div>
@@ -834,6 +1075,7 @@ export default function DashboardLayout({ children }) {
                 {notice && (
                     <div className="fixed right-4 top-20 z-[60] flex max-w-md items-start justify-between gap-3 rounded-xl border border-blue-200 bg-white px-4 py-3 text-sm text-blue-900 shadow-lg">
                         <p>{notice}</p>
+
                         <button
                             type="button"
                             onClick={() => setNotice("")}
@@ -852,21 +1094,26 @@ export default function DashboardLayout({ children }) {
                         <button
                             type="button"
                             aria-label="Close navigation"
-                            onClick={() => setMobileMenuOpen(false)}
+                            onClick={() =>
+                                setMobileMenuOpen(false)
+                            }
                             className="fixed inset-0 top-[76px] z-30 bg-slate-950/40 lg:hidden"
                         />
                     )}
 
                     {/* SIDEBAR */}
                     <aside
-                        className={`fixed bottom-0 left-0 top-[76px] z-30 flex w-[250px] flex-col border-r border-slate-200 bg-white transition-transform duration-300 lg:sticky lg:top-[76px] lg:z-10 lg:h-[calc(100vh-76px)] lg:translate-x-0 ${mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
+                        className={`fixed bottom-0 left-0 top-[76px] z-30 flex w-[250px] flex-col border-r border-slate-200 bg-white transition-transform duration-300 lg:sticky lg:top-[76px] lg:z-10 lg:h-[calc(100vh-76px)] lg:translate-x-0 ${mobileMenuOpen
+                            ? "translate-x-0"
+                            : "-translate-x-full"
                             }`}
                     >
                         <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-6">
                             {navGroups.map((group, index) => {
                                 const items = group.items.filter(
                                     (item) =>
-                                        item.name !== "Users" || canManageUsers
+                                        item.name !== "Users" ||
+                                        canManageUsers
                                 );
 
                                 return (
@@ -881,12 +1128,18 @@ export default function DashboardLayout({ children }) {
                                             {items.map((item) => {
                                                 const active = item.path
                                                     ? pathname === item.path ||
-                                                    (item.path !== "/dashboard" &&
-                                                        pathname.startsWith(item.path + "/"))
+                                                    (
+                                                        item.path !== "/dashboard" &&
+                                                        pathname.startsWith(
+                                                            item.path + "/"
+                                                        )
+                                                    )
                                                     : item.children?.some(
                                                         (child) =>
                                                             pathname === child.path ||
-                                                            pathname.startsWith(child.path + "/")
+                                                            pathname.startsWith(
+                                                                child.path + "/"
+                                                            )
                                                     );
 
                                                 return (
@@ -895,12 +1148,17 @@ export default function DashboardLayout({ children }) {
                                                             type="button"
                                                             onClick={() => {
                                                                 if (item.children) {
-                                                                    setOpenMenus((previous) => ({
-                                                                        ...previous,
-                                                                        [item.name]: !previous[item.name],
-                                                                    }));
+                                                                    setOpenMenus(
+                                                                        (previous) => ({
+                                                                            ...previous,
+                                                                            [item.name]:
+                                                                                !previous[item.name],
+                                                                        })
+                                                                    );
                                                                 } else if (item.path) {
-                                                                    router.push(item.path);
+                                                                    router.push(
+                                                                        item.path
+                                                                    );
                                                                 }
                                                             }}
                                                             className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium transition ${active
@@ -917,36 +1175,49 @@ export default function DashboardLayout({ children }) {
                                                             </span>
 
                                                             {item.children && (
-                                                                <span className={`text-xs transition-transform ${openMenus[item.name] ? "rotate-180" : ""
-                                                                    }`}>
+                                                                <span
+                                                                    className={`text-xs transition-transform ${openMenus[item.name]
+                                                                        ? "rotate-180"
+                                                                        : ""
+                                                                        }`}
+                                                                >
                                                                     ⌄
                                                                 </span>
                                                             )}
                                                         </button>
 
-                                                        {item.children && openMenus[item.name] && (
-                                                            <div className="ml-9 mt-1 space-y-1 border-l border-slate-200 pl-3">
-                                                                {item.children.map((child) => {
-                                                                    const childActive =
-                                                                        pathname === child.path ||
-                                                                        pathname.startsWith(child.path + "/");
+                                                        {item.children &&
+                                                            openMenus[item.name] && (
+                                                                <div className="ml-9 mt-1 space-y-1 border-l border-slate-200 pl-3">
+                                                                    {item.children.map(
+                                                                        (child) => {
+                                                                            const childActive =
+                                                                                pathname === child.path ||
+                                                                                pathname.startsWith(
+                                                                                    child.path + "/"
+                                                                                );
 
-                                                                    return (
-                                                                        <button
-                                                                            key={child.path}
-                                                                            type="button"
-                                                                            onClick={() => router.push(child.path)}
-                                                                            className={`block w-full rounded-lg px-2 py-2 text-left text-xs leading-5 transition ${childActive
-                                                                                ? "bg-blue-50 font-semibold text-blue-700"
-                                                                                : "text-slate-500 hover:bg-slate-50 hover:text-blue-700"
-                                                                                }`}
-                                                                        >
-                                                                            {child.name}
-                                                                        </button>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        )}
+                                                                            return (
+                                                                                <button
+                                                                                    key={child.path}
+                                                                                    type="button"
+                                                                                    onClick={() =>
+                                                                                        router.push(
+                                                                                            child.path
+                                                                                        )
+                                                                                    }
+                                                                                    className={`block w-full rounded-lg px-2 py-2 text-left text-xs leading-5 transition ${childActive
+                                                                                        ? "bg-blue-50 font-semibold text-blue-700"
+                                                                                        : "text-slate-500 hover:bg-slate-50 hover:text-blue-700"
+                                                                                        }`}
+                                                                                >
+                                                                                    {child.name}
+                                                                                </button>
+                                                                            );
+                                                                        }
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                     </div>
                                                 );
                                             })}
@@ -962,6 +1233,7 @@ export default function DashboardLayout({ children }) {
                                 <p className="text-xs font-semibold text-slate-800">
                                     Company Records &amp; Expiry Tracker
                                 </p>
+
                                 <p className="mt-1 text-[11px] text-slate-500">
                                     Version 2.1.0
                                 </p>

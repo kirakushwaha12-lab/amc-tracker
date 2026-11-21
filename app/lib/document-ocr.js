@@ -1,7 +1,7 @@
 
 "use client";
 import { getIdToken } from "firebase/auth";
-import { auth } from "@/app/lib/firebase";
+import { auth } from "../../lib/firebase";
 
 /**
  * Shared OCR.Space recognition and common form-field extractor.
@@ -32,13 +32,63 @@ function normalizeLabel(value) {
         .replace(/[^a-z0-9]/g, "");
 }
 
+
 function getLines(text) {
-    return String(text ?? "")
-        .replace(/\r\n?/g, "\n")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
+    const source = String(text ?? "")
+        .replace(/\r\n?/g, "\n");
+
+    const result = [];
+
+    for (const originalLine of source.split("\n")) {
+        const line = originalLine.trim();
+
+        if (!line) continue;
+
+        // Markdown / OCR pipe-table rows
+        if (line.includes("|")) {
+            const cells = line
+                .split("|")
+                .map((cell) =>
+                    cell
+                        .trim()
+                        .replace(/^`|`$/g, "")
+                        .replace(/^\*\*|\*\*$/g, "")
+                )
+                .filter(Boolean);
+
+            // Ignore Markdown table separator rows
+            if (
+                cells.length &&
+                cells.every((cell) => /^:?-{2,}:?$/.test(cell))
+            ) {
+                continue;
+            }
+
+            // Convert label-value pairs into standard lines
+            if (cells.length >= 2) {
+                for (let i = 0; i + 1 < cells.length; i += 2) {
+                    result.push(`${cells[i]}: ${cells[i + 1]}`);
+                }
+
+                continue;
+            }
+        }
+
+        // Remove common Markdown formatting
+        const cleaned = line
+            .replace(/^#{1,6}\s*/, "")
+            .replace(/^[-*•]\s+/, "")
+            .replace(/^\*\*|\*\*$/g, "")
+            .trim();
+
+        if (cleaned) {
+            result.push(cleaned);
+        }
+    }
+
+    return result;
 }
+
 
 function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -555,14 +605,17 @@ export async function recognizeDocumentImage(file, options = {}) {
     let response;
 
     try {
-        response = await fetch("/api/ocr", {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${idToken}`,
-            },
-            body: formData,
-            signal: AbortSignal.timeout(130000),
-        });
+        response = await fetch(
+            "https://ail-ocr-api.kirakushwaha12.workers.dev/",
+            {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${idToken}`,
+                },
+                body: formData,
+                signal: AbortSignal.timeout(130000),
+            }
+        );
     } catch (error) {
         if (error.name === "TimeoutError") {
             throw new Error("OCR processing timed out. Please try again.");
@@ -582,6 +635,9 @@ export async function recognizeDocumentImage(file, options = {}) {
             "The OCR service returned an invalid response."
         );
     }
+
+    console.log("OCR HTTP STATUS:", response.status);
+    console.log("OCR RESPONSE DATA:", data);
 
     if (!response.ok || !data?.success) {
         throw new Error(

@@ -2,7 +2,7 @@
 "use client";
 
 import imageCompression from "browser-image-compression";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import {
@@ -17,9 +17,14 @@ import {
     deleteField,
 } from "firebase/firestore";
 import { auth, db } from "../../../lib/firebase";
-
+import {
+    recognizeDocumentImage,
+    extractDocumentFields,
+    mergeExtractedFields,
+} from "../../lib/document-ocr";
+import { renewRecord } from "../../lib/renewal-history";
+import RenewalHistory from "../../components/RenewalHistory";
 const BLUE = "#0b4da2";
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 const COLLECTION_NAME = "it_devices";
 const MAX_DOCUMENT_SIZE = 500 * 1024;
 
@@ -227,6 +232,9 @@ export default function SoftwareLicensePage() {
     const router = useRouter();
 
     const [records, setRecords] = useState([]);
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
@@ -238,12 +246,17 @@ export default function SoftwareLicensePage() {
 
     const [selectedDocument, setSelectedDocument] = useState(null);
     const [existingDocument, setExistingDocument] = useState(null);
+    const [readingDocument, setReadingDocument] = useState(false);
+    const [documentOcrMessage, setDocumentOcrMessage] = useState("");
+    const formRef = useRef(null);
 
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState("All");
     const [periodFilter, setPeriodFilter] = useState("All");
 
     const [editingId, setEditingId] = useState(null);
+    const [renewingId, setRenewingId] = useState(null);
+    const [showRenewalHistory, setShowRenewalHistory] = useState(false);
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
@@ -269,11 +282,7 @@ export default function SoftwareLicensePage() {
 
                 setLoading(true);
                 setError("");
-
                 try {
-                    const isFixedSuperAdmin =
-                        user.uid === SUPER_ADMIN_UID;
-
                     const userSnapshot = await getDoc(
                         doc(db, "users", user.uid)
                     );
@@ -289,29 +298,27 @@ export default function SoftwareLicensePage() {
                         .toLowerCase()
                         .replace(/[\s_-]+/g, "");
 
-                    const isActive =
-                        userData.active === true || isFixedSuperAdmin;
-
-                    const superAdmin =
-                        isFixedSuperAdmin ||
-                        (isActive && role === "superadmin");
-
-                    const canEdit =
-                        superAdmin ||
-                        (isActive &&
-                            ["admin", "editor"].includes(role));
-
-                    setIsSuperAdmin(superAdmin);
-                    setCanEditRecords(canEdit);
+                    const isActive = userData.active === true;
 
                     if (!isActive) {
                         setRecords([]);
+                        setIsSuperAdmin(false);
+                        setCanEditRecords(false);
                         setError(
                             "Your account is inactive. Please contact the Super Admin."
                         );
                         setLoading(false);
                         return;
                     }
+
+                    const superAdmin = role === "superadmin";
+
+                    const canEdit =
+                        superAdmin ||
+                        ["admin", "editor"].includes(role);
+
+                    setIsSuperAdmin(superAdmin);
+                    setCanEditRecords(canEdit);
 
                     unsubscribeRecords = onSnapshot(
                         collection(db, COLLECTION_NAME),
@@ -420,14 +427,26 @@ export default function SoftwareLicensePage() {
             unsubscribeRecords?.();
         };
     }, [router]);
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
 
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
     const preparedRecords = useMemo(
         () =>
             records.map((record) => ({
                 ...record,
                 status: getStatus(record.expiryDate),
             })),
-        [records]
+        [records, todayKey]
     );
 
     const counts = useMemo(() => {
@@ -518,6 +537,8 @@ export default function SoftwareLicensePage() {
     function resetDocumentState() {
         setSelectedDocument(null);
         setExistingDocument(null);
+        setDocumentOcrMessage("");
+        setReadingDocument(false);
     }
 
     function openAddForm() {
@@ -529,6 +550,7 @@ export default function SoftwareLicensePage() {
         }
 
         setEditingId(null);
+        setRenewingId(null);
         setForm({ ...initialForm });
         resetDocumentState();
         setFormError("");
@@ -546,6 +568,7 @@ export default function SoftwareLicensePage() {
         }
 
         setEditingId(record.id);
+        setRenewingId(null);
 
         setForm({
             licenseName: record.licenseName ?? "",
@@ -576,7 +599,46 @@ export default function SoftwareLicensePage() {
         setNotice("");
         setShowForm(true);
     }
+    function openRenewForm(record) {
+        if (!canEditRecords) {
+            setError(
+                "You do not have permission to renew Software License records."
+            );
+            return;
+        }
 
+        setEditingId(null);
+        setRenewingId(record.id);
+
+        setForm({
+            licenseName: record.licenseName ?? "",
+            licenseId: record.licenseId ?? "",
+            vendor: record.vendor ?? "",
+            startDate: "",
+            expiryDate: "",
+            cost: "",
+            branchUnit: record.branchUnit ?? "",
+            remarks: "",
+        });
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    documentData: record.documentData,
+                    documentName: record.documentName || "Saved document",
+                    documentSize: record.documentSize || 0,
+                    documentType: record.documentType || "",
+                }
+                : null
+        );
+
+        setSelectedDocument(null);
+        setDocumentOcrMessage("");
+        setFormError("");
+        setError("");
+        setNotice("");
+        setShowForm(true);
+    }
     function updateForm(event) {
         const { name, value } = event.target;
 
@@ -585,6 +647,7 @@ export default function SoftwareLicensePage() {
             [name]: value,
         }));
     }
+
 
     async function handleDocumentChange(event) {
         const input = event.target;
@@ -595,6 +658,7 @@ export default function SoftwareLicensePage() {
         if (!file) return;
 
         setFormError("");
+        setDocumentOcrMessage("");
         setSelectedDocument(null);
 
         const extension = getDocumentExtension(file.name);
@@ -607,8 +671,7 @@ export default function SoftwareLicensePage() {
         }
 
         try {
-            const processedFile =
-                await compressImageIfNeeded(file);
+            const processedFile = await compressImageIfNeeded(file);
 
             if (processedFile.size > MAX_DOCUMENT_SIZE) {
                 setFormError(
@@ -617,7 +680,72 @@ export default function SoftwareLicensePage() {
                 return;
             }
 
+            // Keep the selected document even if OCR cannot read it.
             setSelectedDocument(processedFile);
+
+            // Word documents can be uploaded, but OCR.Space
+            // currently supports PDF and image documents only.
+            if (["doc", "docx"].includes(extension)) {
+                setDocumentOcrMessage(
+                    "Document selected successfully. DOC/DOCX files can be saved, but automatic OCR is available for PDF and image files."
+                );
+                return;
+            }
+
+            setReadingDocument(true);
+
+            setDocumentOcrMessage(
+                "Reading document and extracting license details..."
+            );
+
+            try {
+                const rawText = await recognizeDocumentImage(processedFile);
+
+                console.log(
+                    "SOFTWARE LICENSE OCR RAW TEXT:",
+                    rawText
+                );
+
+                if (!rawText.trim()) {
+                    setDocumentOcrMessage(
+                        "Document selected, but no readable text was found. Please enter the details manually."
+                    );
+                    return;
+                }
+
+                const extracted =
+                    extractDocumentFields(rawText, formRef.current) || {};
+
+                // Remarks should never be automatically filled.
+                delete extracted.remarks;
+
+                console.log(
+                    "SOFTWARE LICENSE OCR EXTRACTED:",
+                    extracted
+                );
+
+                const { form: mergedForm, filledCount } =
+                    mergeExtractedFields(form, extracted);
+
+                setForm(mergedForm);
+
+                setDocumentOcrMessage(
+                    filledCount > 0
+                        ? `${filledCount} field(s) detected and filled. Please verify the extracted details.`
+                        : "Document text was read, but matching license details were not found. Please enter the details manually."
+                );
+            } catch (ocrError) {
+                console.error(
+                    "Software License OCR error:",
+                    ocrError
+                );
+
+                setDocumentOcrMessage(
+                    `Document selected, but OCR could not extract details: ${ocrError.message || "Please enter the details manually."}`
+                );
+            } finally {
+                setReadingDocument(false);
+            }
         } catch (err) {
             console.error(
                 "Software License document processing error:",
@@ -716,7 +844,7 @@ export default function SoftwareLicensePage() {
                     documentType:
                         existingDocument.documentType || "",
                 };
-            } else if (editingId) {
+            } else if (editingId || renewingId) {
                 documentFields = {
                     documentData: deleteField(),
                     documentName: deleteField(),
@@ -725,7 +853,26 @@ export default function SoftwareLicensePage() {
                 };
             }
 
-            if (editingId) {
+            if (renewingId) {
+                await renewRecord({
+                    collectionName: COLLECTION_NAME,
+                    recordId: renewingId,
+                    moduleName: "Software License",
+                    renewalData: {
+                        ...recordData,
+                        ...documentFields,
+                    },
+                    actor: {
+                        uid: auth.currentUser?.uid || "",
+                        email: auth.currentUser?.email || "",
+                        displayName: auth.currentUser?.displayName || "",
+                    },
+                });
+
+                setNotice(
+                    "Software License renewed successfully. Previous details saved in Renewal History."
+                );
+            } else if (editingId) {
                 await updateDoc(
                     doc(db, COLLECTION_NAME, editingId),
                     {
@@ -752,6 +899,7 @@ export default function SoftwareLicensePage() {
             setShowForm(false);
             setForm({ ...initialForm });
             setEditingId(null);
+            setRenewingId(null);
             setFormError("");
             resetDocumentState();
 
@@ -767,9 +915,11 @@ export default function SoftwareLicensePage() {
                     ? "Permission denied. Please check Firestore security rules."
                     : err.code === "resource-exhausted"
                         ? "The document or record is too large for Firestore. Please choose a smaller document."
-                        : editingId
-                            ? "Software License record could not be updated. Please try again."
-                            : "Software License record could not be saved. Please try again."
+                        : renewingId
+                            ? "Software License could not be renewed. Please try again."
+                            : editingId
+                                ? "Software License record could not be updated. Please try again."
+                                : "Software License record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -835,14 +985,25 @@ export default function SoftwareLicensePage() {
                     </div>
 
                     {canEditRecords && (
-                        <button
-                            type="button"
-                            onClick={openAddForm}
-                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                            style={{ backgroundColor: BLUE }}
-                        >
-                            + Add License
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Software License
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setShowRenewalHistory(true)}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                Renewal History
+                            </button>
+                        </div>
                     )}
                 </div>
 
@@ -1102,15 +1263,23 @@ export default function SoftwareLicensePage() {
                                                     )}
 
                                                     {canEditRecords && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                openEditForm(record)
-                                                            }
-                                                            className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50"
-                                                        >
-                                                            Edit
-                                                        </button>
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openRenewForm(record)}
+                                                                className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                                                            >
+                                                                Renew
+                                                            </button>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openEditForm(record)}
+                                                                className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                                            >
+                                                                Edit
+                                                            </button>
+                                                        </>
                                                     )}
 
                                                     {isSuperAdmin && (
@@ -1171,9 +1340,11 @@ export default function SoftwareLicensePage() {
                         <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
                             <div>
                                 <h2 className="text-lg font-bold text-slate-900">
-                                    {editingId
-                                        ? "Edit Software License"
-                                        : "Add Software License"}
+                                    {renewingId
+                                        ? "Renew Software License"
+                                        : editingId
+                                            ? "Edit Software License"
+                                            : "Add Software License"}
                                 </h2>
 
                                 <p className="mt-1 text-sm text-slate-500">
@@ -1186,6 +1357,9 @@ export default function SoftwareLicensePage() {
                                 onClick={() => {
                                     setShowForm(false);
                                     setFormError("");
+                                    setEditingId(null);
+                                    setRenewingId(null);
+                                    setForm({ ...initialForm });
                                     resetDocumentState();
                                 }}
                                 disabled={saving}
@@ -1196,6 +1370,7 @@ export default function SoftwareLicensePage() {
                         </div>
 
                         <form
+                            ref={formRef}
                             onSubmit={handleSubmit}
                             className="grid gap-4 p-6 sm:grid-cols-2"
                         >
@@ -1204,6 +1379,7 @@ export default function SoftwareLicensePage() {
                                 <input
                                     required
                                     name="licenseName"
+                                    data-ocr-aliases="Software Name|License Name|Product Name|Application Name|Software / License Name"
                                     value={form.licenseName}
                                     onChange={updateForm}
                                     placeholder="e.g. Microsoft 365, Adobe, Antivirus"
@@ -1215,6 +1391,7 @@ export default function SoftwareLicensePage() {
                                 License ID
                                 <input
                                     name="licenseId"
+                                    data-ocr-aliases="License ID|License Key|Product Key|Serial Number|Activation Key"
                                     value={form.licenseId}
                                     onChange={updateForm}
                                     placeholder="Enter license ID"
@@ -1227,6 +1404,7 @@ export default function SoftwareLicensePage() {
                                 <input
                                     required
                                     name="vendor"
+                                    data-ocr-aliases="Vendor|Provider|Supplier|Publisher|Company"
                                     value={form.vendor}
                                     onChange={updateForm}
                                     placeholder="Enter vendor or provider name"
@@ -1240,6 +1418,7 @@ export default function SoftwareLicensePage() {
                                     required
                                     type="date"
                                     name="startDate"
+                                    data-ocr-aliases="Start Date|License Start Date|Subscription Start Date|Purchase Date|Effective Date"
                                     value={form.startDate}
                                     onChange={updateForm}
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
@@ -1253,6 +1432,7 @@ export default function SoftwareLicensePage() {
                                     type="date"
                                     min={form.startDate || undefined}
                                     name="expiryDate"
+                                    data-ocr-aliases="Expiry Date|Expiration Date|License Expiry Date|Valid Until|Valid Through|End Date"
                                     value={form.expiryDate}
                                     onChange={updateForm}
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
@@ -1267,6 +1447,7 @@ export default function SoftwareLicensePage() {
                                     min="0"
                                     step="0.01"
                                     name="cost"
+                                    data-ocr-aliases="Cost|License Cost|Amount|Price|Charges|Total Amount"
                                     value={form.cost}
                                     onChange={updateForm}
                                     placeholder="Enter license cost"
@@ -1278,21 +1459,10 @@ export default function SoftwareLicensePage() {
                                 Branch / Unit
                                 <input
                                     name="branchUnit"
+                                    data-ocr-aliases="Branch|Unit|Branch / Unit|Location|Office"
                                     value={form.branchUnit}
                                     onChange={updateForm}
                                     placeholder="Enter branch or unit"
-                                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
-                                />
-                            </label>
-
-                            <label className="text-sm font-medium text-slate-700 sm:col-span-2">
-                                Remarks
-                                <textarea
-                                    name="remarks"
-                                    value={form.remarks}
-                                    onChange={updateForm}
-                                    rows={3}
-                                    placeholder="Enter remarks (optional)"
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
                                 />
                             </label>
@@ -1387,12 +1557,26 @@ export default function SoftwareLicensePage() {
                                         {(selectedDocument.size / 1024).toFixed(1)} KB)
                                     </p>
                                 )}
-
+                                {documentOcrMessage && (
+                                    <p className="mt-3 rounded-lg border border-blue-100 bg-white p-3 text-xs text-blue-700">
+                                        {documentOcrMessage}
+                                    </p>
+                                )}
                                 <p className="mt-2 text-xs text-slate-500">
                                     Images larger than 100 KB are compressed before saving.
                                 </p>
                             </div>
-
+                            <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                                Remarks
+                                <textarea
+                                    name="remarks"
+                                    value={form.remarks}
+                                    onChange={updateForm}
+                                    rows={3}
+                                    placeholder="Enter remarks (optional)"
+                                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
+                                />
+                            </label>
                             {formError && (
                                 <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">
                                     {formError}
@@ -1405,6 +1589,9 @@ export default function SoftwareLicensePage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        setEditingId(null);
+                                        setRenewingId(null);
+                                        setForm({ ...initialForm });
                                         resetDocumentState();
                                     }}
                                     disabled={saving}
@@ -1415,22 +1602,35 @@ export default function SoftwareLicensePage() {
 
                                 <button
                                     type="submit"
-                                    disabled={saving}
+                                    disabled={saving || readingDocument}
                                     className="rounded-lg px-5 py-2 text-sm font-semibold text-white disabled:opacity-60"
                                     style={{ backgroundColor: BLUE }}
                                 >
-                                    {saving
-                                        ? editingId
-                                            ? "Updating..."
-                                            : "Saving..."
-                                        : editingId
-                                            ? "Update License"
-                                            : "Save License"}
+                                    {readingDocument
+                                        ? "Reading Document..."
+                                        : saving
+                                            ? renewingId
+                                                ? "Renewing..."
+                                                : editingId
+                                                    ? "Updating..."
+                                                    : "Saving..."
+                                            : renewingId
+                                                ? "Renew License"
+                                                : editingId
+                                                    ? "Update License"
+                                                    : "Save License"}
+
                                 </button>
                             </div>
                         </form>
                     </div>
                 </div>
+            )}
+            {showRenewalHistory && (
+                <RenewalHistory
+                    moduleName="Software License"
+                    onClose={() => setShowRenewalHistory(false)}
+                />
             )}
         </main>
     );

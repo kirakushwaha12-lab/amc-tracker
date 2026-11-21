@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -10,6 +11,8 @@ const MODULES = [
     "Pollution",
     "Software License",
     "Compliance",
+    "Machinery",
+    "Service",
 ];
 
 const REPORTS = [
@@ -63,35 +66,36 @@ function toDate(value) {
 }
 
 function getModule(record) {
-    if (record._source === "compliance_records") {
+    const source = record._source;
+    const type = String(record.type || "").trim().toLowerCase();
+    const category = String(record.category || "").trim().toLowerCase();
+    const values = `${type} ${category}`;
+
+    if (source === "compliance_records") {
         return "Compliance";
     }
 
-    if (record._source === "vehicles") {
-        const type = String(
-            record.type || record.category || ""
-        ).toLowerCase();
-
-        return type.includes("pollution")
-            ? "Pollution"
-            : "Insurance";
+    if (source === "machinery_records") {
+        return "Machinery";
     }
 
-    const type = String(
-        record.type || record.category || ""
-    ).toLowerCase();
+    if (source === "vehicles") {
+        if (values.includes("pollution")) return "Pollution";
+        if (values.includes("service")) return "Service";
+        return "Insurance";
+    }
 
-    if (type.includes("warranty")) return "Warranty";
-    if (type.includes("software")) return "Software License";
-    if (type.includes("amc")) return "AMC";
+    if (values.includes("warranty")) return "Warranty";
+    if (values.includes("software")) return "Software License";
+    if (values.includes("amc")) return "AMC";
+    if (values.includes("pollution")) return "Pollution";
+    if (values.includes("service")) return "Service";
 
     return "IT Devices";
 }
 
-function getExpiryDate(record) {
-    const module = getModule(record);
-
-    let fields;
+function getExpiryDate(record, module, eventType) {
+    let fields = [];
 
     if (module === "Insurance") {
         fields = ["expiryDate"];
@@ -106,18 +110,48 @@ function getExpiryDate(record) {
             "endDate",
         ];
     } else if (module === "AMC") {
-        fields = ["endDate"];
+        fields = ["endDate", "expiryDate"];
     } else if (module === "Warranty") {
         fields = [
-            "warrantyExpiry",
-            "warrantyExpired",
             "endDate",
             "expiryDate",
+            "warrantyExpiry",
+            "warrantyExpired",
         ];
     } else if (module === "Software License") {
-        fields = ["expiryDate"];
+        fields = ["expiryDate", "endDate"];
+    } else if (module === "Machinery") {
+        fields = eventType === "AMC Expiry"
+            ? ["amcEndDate"]
+            : ["nextDueDate", "nextServiceDueDate"];
+    } else if (module === "Service") {
+        fields = ["nextServiceDueDate"];
+    }
+
+    for (const field of fields) {
+        const date = toDate(record[field]);
+        if (date) return date;
+    }
+
+    return null;
+}
+function getStartDate(record, module, eventType) {
+    let fields = [];
+
+    if (module === "Pollution") {
+        fields = ["certificateDate"];
+    } else if (module === "Compliance") {
+        fields = ["examinationDate", "lastExaminationDate"];
+    } else if (module === "Warranty") {
+        fields = ["purchaseDate", "startDate"];
+    } else if (module === "Machinery") {
+        fields = eventType === "AMC Expiry"
+            ? ["amcStartDate"]
+            : ["lastServiceDate"];
+    } else if (module === "Service") {
+        fields = ["lastServiceDate"];
     } else {
-        fields = ["endDate", "expiryDate"];
+        fields = ["startDate", "periodDate", "purchaseDate"];
     }
 
     for (const field of fields) {
@@ -128,27 +162,60 @@ function getExpiryDate(record) {
     return null;
 }
 
-function getStartDate(record) {
-    const module = getModule(record);
-
-    const fields =
-        module === "Pollution"
-            ? ["certificateDate", "startDate"]
-            : module === "Compliance"
-                ? ["examinationDate", "startDate", "periodDate"]
-                : ["startDate", "periodDate", "purchaseDate"];
-
-    for (const field of fields) {
-        const date = toDate(record[field]);
-        if (date) return date;
+function getProductName(record, module) {
+    if (module === "Software License") {
+        return (
+            record.licenseName ||
+            record.softwareName ||
+            record.productName ||
+            record.name ||
+            "Unnamed License"
+        );
     }
 
-    return null;
-}
+    if (module === "Compliance") {
+        return (
+            record.examinationType ||
+            record.typeOfExamination ||
+            record.name ||
+            "Unnamed Compliance"
+        );
+    }
 
-function getProductName(record) {
+    if (module === "Machinery") {
+        return (
+            record.machineName ||
+            record.machineNo ||
+            record.machineNumber ||
+            "Unnamed Machinery"
+        );
+    }
+
+    if (module === "Service") {
+        return record.vehicleName || record.vehicleNo || "Unnamed Vehicle";
+    }
+
+    if (module === "Pollution") {
+        return (
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productName ||
+            "Unnamed Vehicle"
+        );
+    }
+
+    if (module === "Insurance") {
+        return (
+            record.productName ||
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productId ||
+            record.policyNo ||
+            "Unnamed Insurance"
+        );
+    }
+
     return (
-        record.examinationType ||
         record.productName ||
         record.product ||
         record.item ||
@@ -160,22 +227,93 @@ function getProductName(record) {
         "Unnamed Record"
     );
 }
+function getCompany(record, module, eventType) {
+    if (module === "Machinery") {
+        return eventType === "AMC Expiry"
+            ? record.amcVendor || "—"
+            : record.serviceProvider || "—";
+    }
 
-function getCompany(record) {
+    if (module === "Service") {
+        return record.serviceCentre || "—";
+    }
+
+    if (module === "Software License") {
+        return record.vendor || record.provider || "—";
+    }
+
+    if (module === "Pollution") {
+        return record.pucCentre || record.pucCenter || "—";
+    }
+
+    if (module === "Insurance") {
+        return (
+            record.company ||
+            record.companyVendor ||
+            record.vendor ||
+            record.insurerCompany ||
+            record.insuranceCompany ||
+            record.companyName ||
+            "—"
+        );
+    }
+
     return (
         record.companyVendor ||
         record.company ||
         record.vendor ||
         record.supplier ||
         record.serviceProvider ||
-        record.pucCentre ||
-        record.pucCenter ||
-        record.insurerCompany ||
-        record.insuranceCompany ||
         record.partnerCompany ||
         record.companyName ||
         "—"
     );
+}
+
+function getAmount(record, module, eventType) {
+    let value;
+
+    if (module === "Machinery") {
+        value = eventType === "AMC Expiry"
+            ? record.amcCharges
+            : record.serviceCharges;
+    } else if (module === "Service") {
+        value = record.serviceCharges;
+    } else if (module === "Software License") {
+        value = record.cost;
+    } else if (module === "Pollution" || module === "Insurance") {
+        value = record.amount;
+    } else if (module === "Warranty") {
+        value =
+            record.priceWithoutGST ??
+            record.cost ??
+            record.amount ??
+            record.charges;
+    } else if (module === "AMC") {
+        value =
+            record.amcCharges ??
+            record.cost ??
+            record.charges ??
+            record.amount;
+    } else {
+        value =
+            record.cost ??
+            record.charges ??
+            record.amount ??
+            record.price;
+    }
+
+    if (value === undefined || value === null || value === "") {
+        return "—";
+    }
+
+    const amount = Number(value);
+
+    return Number.isFinite(amount)
+        ? `₹${amount.toLocaleString("en-IN", {
+            maximumFractionDigits: 2,
+        })}`
+        : String(value);
 }
 
 function getDaysRemaining(date) {
@@ -187,7 +325,9 @@ function getDaysRemaining(date) {
     const expiry = new Date(date);
     expiry.setHours(0, 0, 0, 0);
 
-    return Math.round((expiry.getTime() - today.getTime()) / 86400000);
+    return Math.round(
+        (expiry.getTime() - today.getTime()) / 86400000
+    );
 }
 
 function getStatus(days) {
@@ -217,20 +357,70 @@ function formatDateInput(date) {
     return `${year}-${month}-${day}`;
 }
 
-function getAmount(record) {
-    const value =
-        record.cost ??
-        record.charges ??
-        record.amount ??
-        record.price ??
-        record.amcCharges ??
-        record.priceWithoutGST;
+function createReportEvents(record) {
+    const module = getModule(record);
 
-    return value === undefined || value === null || value === ""
-        ? "—"
-        : String(value);
+    if (module === "Machinery") {
+        const events = [];
+
+        const serviceExpiry = toDate(
+            record.nextDueDate || record.nextServiceDueDate
+        );
+
+        if (serviceExpiry) {
+            events.push({
+                id: `${record.id}-service-due`,
+                raw: record,
+                module,
+                moduleLabel: "Machinery Service",
+                eventType: "Service Due",
+                productName: getProductName(record, module),
+                companyName: getCompany(record, module, "Service Due"),
+                startDate: getStartDate(record, module, "Service Due"),
+                expiryDate: serviceExpiry,
+                amount: getAmount(record, module, "Service Due"),
+            });
+        }
+
+        const isAmcApplicable =
+            String(record.amcApplicable || "").trim().toLowerCase() === "yes";
+
+        const amcExpiry = toDate(record.amcEndDate);
+
+        if (isAmcApplicable && amcExpiry) {
+            events.push({
+                id: `${record.id}-amc-expiry`,
+                raw: record,
+                module,
+                moduleLabel: "Machinery AMC",
+                eventType: "AMC Expiry",
+                productName: getProductName(record, module),
+                companyName: getCompany(record, module, "AMC Expiry"),
+                startDate: getStartDate(record, module, "AMC Expiry"),
+                expiryDate: amcExpiry,
+                amount: getAmount(record, module, "AMC Expiry"),
+            });
+        }
+
+        return events;
+    }
+
+    const expiryDate = getExpiryDate(record, module);
+    const startDate = getStartDate(record, module);
+
+    return [{
+        id: record.id,
+        raw: record,
+        module,
+        moduleLabel: module,
+        eventType: module === "Service" ? "Service Due" : module,
+        productName: getProductName(record, module),
+        companyName: getCompany(record, module),
+        startDate,
+        expiryDate,
+        amount: getAmount(record, module),
+    }];
 }
-
 export default function ReportsPage() {
     const { records = [], loadingData, dataError } = useDashboardShell();
 
@@ -261,23 +451,17 @@ export default function ReportsPage() {
     }, [todayKey]);
 
     const normalizedRecords = useMemo(() => {
-        return records.map((record) => {
-            const expiryDate = getExpiryDate(record);
-            const startDate = getStartDate(record);
-            const daysRemaining = getDaysRemaining(expiryDate);
+        return records.flatMap((record) =>
+            createReportEvents(record).map((event) => {
+                const daysRemaining = getDaysRemaining(event.expiryDate);
 
-            return {
-                id: record.id,
-                raw: record,
-                productName: getProductName(record),
-                companyName: getCompany(record),
-                module: getModule(record),
-                startDate,
-                expiryDate,
-                daysRemaining,
-                status: getStatus(daysRemaining),
-            };
-        });
+                return {
+                    ...event,
+                    daysRemaining,
+                    status: getStatus(daysRemaining),
+                };
+            })
+        );
     }, [records, todayKey]);
 
     const filteredRecords = useMemo(() => {
@@ -310,6 +494,7 @@ export default function ReportsPage() {
             }
 
             if (
+                !MODULES.includes(selectedReport) &&
                 moduleFilter !== "All" &&
                 record.module !== moduleFilter
             ) {
@@ -344,6 +529,8 @@ export default function ReportsPage() {
                     record.productName,
                     record.companyName,
                     record.module,
+                    record.moduleLabel,
+                    record.eventType,
                     record.status,
                 ].some((value) =>
                     String(value || "").toLowerCase().includes(query)
@@ -395,15 +582,13 @@ export default function ReportsPage() {
                     ? "Records past their expiry date"
                     : `Detailed ${selectedReport} records`;
 
-    const summaryCounts = useMemo(() => {
-        return {
-            total: filteredRecords.length,
-            active: filteredRecords.filter((r) => r.status === "Active").length,
-            expiring: filteredRecords.filter((r) => r.status === "Expiring Soon").length,
-            expired: filteredRecords.filter((r) => r.status === "Expired").length,
-            unknown: filteredRecords.filter((r) => r.status === "Unknown").length,
-        };
-    }, [filteredRecords]);
+    const summaryCounts = useMemo(() => ({
+        total: filteredRecords.length,
+        active: filteredRecords.filter((r) => r.status === "Active").length,
+        expiring: filteredRecords.filter((r) => r.status === "Expiring Soon").length,
+        expired: filteredRecords.filter((r) => r.status === "Expired").length,
+        unknown: filteredRecords.filter((r) => r.status === "Unknown").length,
+    }), [filteredRecords]);
 
     const getModuleCounts = (module) => {
         const moduleRecords = filteredRecords.filter(
@@ -434,522 +619,511 @@ export default function ReportsPage() {
     };
 
     return (
-        <div className="w-full min-w-0 space-y-6">
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-                        Reports
-                    </h2>
-                    <p className="mt-1 text-sm text-slate-500">
-                        View, filter and download company expiry reports.
-                    </p>
+        <main className="min-h-screen bg-slate-100 p-4 sm:p-6 lg:p-8">
+            <div className="mx-auto max-w-[1600px] space-y-6">
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                        <h1 className="mt-1 text-3xl font-bold text-slate-900">
+                            Report Management
+                        </h1>
+                        <p className="mt-2 text-sm text-slate-500">
+                            View, filter and download company expiry reports.
+                        </p>
+                    </div>
+
+                    <span className="text-xs text-slate-500">
+                        {loadingData
+                            ? "Loading records..."
+                            : `${records.length} database records`}
+                    </span>
                 </div>
 
-                <span className="text-xs text-slate-500">
-                    {loadingData
-                        ? "Loading records..."
-                        : `${records.length} database records`}
-                </span>
-            </div>
+                {dataError && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                        {dataError}
+                    </div>
+                )}
 
-            {dataError && (
-                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                    {dataError}
-                </div>
-            )}
-
-            {/* STEP 1: Select report category */}
-            {!reportMode ? (
-                <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    <button
-                        type="button"
-                        onClick={() => setReportMode("module")}
-                        className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-400 hover:bg-blue-50/40"
-                    >
-                        <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-xl text-blue-700">
-                            ▦
-                        </span>
-                        <span className="mt-4 block text-lg font-bold text-slate-900">
-                            Module-wise
-                        </span>
-                        <span className="mt-2 block text-sm text-slate-500">
-                            Choose a module to view its detailed records and expiry information.
-                        </span>
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => setReportMode("summary")}
-                        className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-400 hover:bg-blue-50/40"
-                    >
-                        <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-100 text-xl text-indigo-700">
-                            ▤
-                        </span>
-                        <span className="mt-4 block text-lg font-bold text-slate-900">
-                            Summary-wise
-                        </span>
-                        <span className="mt-2 block text-sm text-slate-500">
-                            View all-module counts, upcoming expiries or expired records.
-                        </span>
-                    </button>
-                </section>
-            ) : !selectedReport ? (
-                /* STEP 2: Select a report */
-                <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                            <h3 className="text-base font-bold text-slate-900">
-                                {reportMode === "module"
-                                    ? "Module-wise Reports"
-                                    : "Summary-wise Reports"}
-                            </h3>
-                            <p className="mt-1 text-sm text-slate-500">
-                                Select the report you want to view.
-                            </p>
-                        </div>
+                {!reportMode ? (
+                    <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        <button
+                            type="button"
+                            onClick={() => setReportMode("module")}
+                            className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-400 hover:bg-blue-50/40"
+                        >
+                            <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-xl text-blue-700">
+                                ▦
+                            </span>
+                            <span className="mt-4 block text-lg font-bold text-slate-900">
+                                Module-wise
+                            </span>
+                            <span className="mt-2 block text-sm text-slate-500">
+                                Choose a module to view its detailed records and expiry information.
+                            </span>
+                        </button>
 
                         <button
                             type="button"
-                            onClick={() => {
-                                setReportMode("");
-                                setSelectedReport("");
-                                setShowAll(false);
-                                clearFilters();
-                            }}
-                            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                            onClick={() => setReportMode("summary")}
+                            className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-400 hover:bg-blue-50/40"
                         >
-                            ← Back
+                            <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-100 text-xl text-indigo-700">
+                                ▤
+                            </span>
+                            <span className="mt-4 block text-lg font-bold text-slate-900">
+                                Summary-wise
+                            </span>
+                            <span className="mt-2 block text-sm text-slate-500">
+                                View all-module counts, upcoming expiries or expired records.
+                            </span>
                         </button>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {REPORTS.filter(
-                            (report) =>
-                                report.group ===
-                                (reportMode === "module"
-                                    ? "Module-wise Reports"
-                                    : "Summary Reports")
-                        ).map((report) => (
-                            <button
-                                key={report.value}
-                                type="button"
-                                onClick={() => chooseReport(report.value)}
-                                className="rounded-xl border border-slate-200 p-4 text-left transition hover:border-blue-400 hover:bg-blue-50/50"
-                            >
-                                <span className="block text-sm font-semibold text-slate-900">
-                                    {report.label}
-                                </span>
-                                <span className="mt-2 block text-xs text-slate-500">
-                                    {report.value === "summary"
-                                        ? "Record counts and status by module"
-                                        : report.value === "expiring"
-                                            ? "Upcoming expiries in the next 30 days"
-                                            : report.value === "expired"
-                                                ? "Records with past expiry dates"
-                                                : "View module records and print / save as PDF"}
-                                </span>
-                            </button>
-                        ))}
-                    </div>
-                </section>
-            ) : (
-                /* STEP 3: Display selected report */
-                <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                    <div className="border-b border-slate-100 px-5 py-4">
-                        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    </section>
+                ) : !selectedReport ? (
+                    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h3 className="text-base font-bold text-slate-900">
-                                    {reportTitle}
+                                    {reportMode === "module"
+                                        ? "Module-wise Reports"
+                                        : "Summary-wise Reports"}
                                 </h3>
                                 <p className="mt-1 text-sm text-slate-500">
-                                    {reportSubtitle}
+                                    Select the report you want to view.
                                 </p>
                             </div>
-
-                            <div className="flex flex-wrap gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setSelectedReport("");
-                                        setShowAll(false);
-                                        clearFilters();
-                                    }}
-                                    className="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                                >
-                                    ← Choose Another Report
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={handlePrint}
-                                    disabled={
-                                        loadingData ||
-                                        filteredRecords.length === 0
-                                    }
-                                    className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-                                    style={{ backgroundColor: "#0b4da2" }}
-                                >
-                                    <span aria-hidden="true">▤</span>
-                                    Print / Save as PDF
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Filters */}
-                    <div className="border-b border-slate-100 bg-slate-50/60 p-4">
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            <input
-                                type="text"
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                                placeholder="Search product or company..."
-                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                            />
-
-                            <select
-                                value={moduleFilter}
-                                onChange={(e) => setModuleFilter(e.target.value)}
-                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                            >
-                                <option value="All">All Modules</option>
-                                {MODULES.map((module) => (
-                                    <option key={module} value={module}>
-                                        {module}
-                                    </option>
-                                ))}
-                            </select>
-
-                            <select
-                                value={statusFilter}
-                                onChange={(e) => setStatusFilter(e.target.value)}
-                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                            >
-                                <option value="All">All Statuses</option>
-                                <option value="Active">Active</option>
-                                <option value="Expiring Soon">Expiring Soon</option>
-                                <option value="Expired">Expired</option>
-                                <option value="Unknown">Unknown</option>
-                            </select>
-
-                            <div>
-                                <label className="mb-1 block text-xs font-medium text-slate-600">
-                                    Expiry From
-                                </label>
-                                <input
-                                    type="date"
-                                    value={fromDate}
-                                    max={toDate || undefined}
-                                    onChange={(e) => setFromDate(e.target.value)}
-                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="mb-1 block text-xs font-medium text-slate-600">
-                                    Expiry To
-                                </label>
-                                <input
-                                    type="date"
-                                    value={toDate}
-                                    min={fromDate || undefined}
-                                    onChange={(e) => setToDate(e.target.value)}
-                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                                />
-                            </div>
-                        </div>
-
-                        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                            <p className="text-xs text-slate-500">
-                                Showing {filteredRecords.length} matching records
-                            </p>
 
                             <button
                                 type="button"
-                                onClick={clearFilters}
-                                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+                                onClick={() => {
+                                    setReportMode("");
+                                    setSelectedReport("");
+                                    setShowAll(false);
+                                    clearFilters();
+                                }}
+                                className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                             >
-                                Clear Filters
+                                ← Back
                             </button>
                         </div>
-                    </div>
 
-                    {/* Summary cards */}
-                    <div className="grid grid-cols-2 gap-3 border-b border-slate-100 p-4 sm:grid-cols-4">
-                        {[
-                            ["Total Records", summaryCounts.total, "text-slate-900"],
-                            ["Active", summaryCounts.active, "text-emerald-700"],
-                            ["Expiring Soon", summaryCounts.expiring, "text-amber-700"],
-                            ["Expired", summaryCounts.expired, "text-red-700"],
-                        ].map(([label, value, color]) => (
-                            <div
-                                key={label}
-                                className="rounded-xl border border-slate-200 bg-white p-3"
-                            >
-                                <p className="text-xs text-slate-500">{label}</p>
-                                <p className={`mt-1 text-xl font-bold ${color}`}>
-                                    {value}
-                                </p>
+                        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                            {REPORTS.filter(
+                                (report) =>
+                                    report.group ===
+                                    (reportMode === "module"
+                                        ? "Module-wise Reports"
+                                        : "Summary Reports")
+                            ).map((report) => (
+                                <button
+                                    key={report.value}
+                                    type="button"
+                                    onClick={() => chooseReport(report.value)}
+                                    className="rounded-xl border border-slate-200 p-4 text-left transition hover:border-blue-400 hover:bg-blue-50/50"
+                                >
+                                    <span className="block text-sm font-semibold text-slate-900">
+                                        {report.label}
+                                    </span>
+                                    <span className="mt-2 block text-xs text-slate-500">
+                                        {report.value === "summary"
+                                            ? "Record counts and status by module"
+                                            : report.value === "expiring"
+                                                ? "Upcoming expiries in the next 30 days"
+                                                : report.value === "expired"
+                                                    ? "Records with past expiry dates"
+                                                    : "View module records and print / save as PDF"}
+                                    </span>
+                                </button>
+                            ))}
+                        </div>
+                    </section>
+                ) : (
+                    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                        <div className="border-b border-slate-100 px-5 py-4">
+                            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                                <div>
+                                    <h3 className="text-base font-bold text-slate-900">
+                                        {reportTitle}
+                                    </h3>
+                                    <p className="mt-1 text-sm text-slate-500">
+                                        {reportSubtitle}
+                                    </p>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setSelectedReport("");
+                                            setShowAll(false);
+                                            clearFilters();
+                                        }}
+                                        className="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                                    >
+                                        ← Choose Another Report
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={handlePrint}
+                                        disabled={loadingData || filteredRecords.length === 0}
+                                        className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                                        style={{ backgroundColor: "#0b4da2" }}
+                                    >
+                                        <span aria-hidden="true">▤</span>
+                                        Print / Save as PDF
+                                    </button>
+                                </div>
                             </div>
-                        ))}
-                    </div>
+                        </div>
 
-                    {/* All Modules Summary table */}
-                    {selectedReport === "summary" ? (
-                        <div className="overflow-x-auto">
-                            <table className="min-w-[700px] w-full text-left text-sm">
-                                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                                    <tr>
-                                        {[
-                                            "Module",
-                                            "Total Records",
-                                            "Active",
-                                            "Expiring Soon",
-                                            "Expired",
-                                            "Unknown",
-                                        ].map((heading) => (
-                                            <th
-                                                key={heading}
-                                                className="px-5 py-3 font-semibold"
-                                            >
-                                                {heading}
-                                            </th>
+                        <div className="border-b border-slate-100 bg-slate-50/60 p-4">
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                <input
+                                    type="text"
+                                    value={search}
+                                    onChange={(e) => setSearch(e.target.value)}
+                                    placeholder="Search product or company..."
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                />
+                                {!MODULES.includes(selectedReport) && (
+                                    <select
+                                        value={moduleFilter}
+                                        onChange={(e) => setModuleFilter(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                    >
+                                        <option value="All">All Modules</option>
+                                        {MODULES.map((module) => (
+                                            <option key={module} value={module}>
+                                                {module}
+                                            </option>
                                         ))}
-                                    </tr>
-                                </thead>
+                                    </select>
+                                )}
 
-                                <tbody className="divide-y divide-slate-100">
-                                    {MODULES.map((module) => {
-                                        const counts = getModuleCounts(module);
+                                <select
+                                    value={statusFilter}
+                                    onChange={(e) => setStatusFilter(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                >
+                                    <option value="All">All Statuses</option>
+                                    <option value="Active">Active</option>
+                                    <option value="Expiring Soon">Expiring Soon</option>
+                                    <option value="Expired">Expired</option>
+                                    <option value="Unknown">Unknown</option>
+                                </select>
 
-                                        return (
-                                            <tr
-                                                key={module}
-                                                className="transition hover:bg-slate-50"
-                                            >
-                                                <td className="px-5 py-4 font-semibold text-slate-800">
-                                                    {module}
-                                                </td>
-                                                <td className="px-5 py-4">{counts.total}</td>
-                                                <td className="px-5 py-4">{counts.active}</td>
-                                                <td className="px-5 py-4">{counts.expiring}</td>
-                                                <td className="px-5 py-4">{counts.expired}</td>
-                                                <td className="px-5 py-4">{counts.unknown}</td>
-                                            </tr>
-                                        );
-                                    })}
+                                <div>
+                                    <label className="mb-1 block text-xs font-medium text-slate-600">
+                                        Expiry From
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={fromDate}
+                                        max={toDate || undefined}
+                                        onChange={(e) => setFromDate(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                    />
+                                </div>
 
-                                    <tr className="bg-slate-50 font-bold">
-                                        <td className="px-5 py-4">TOTAL</td>
-                                        <td className="px-5 py-4">{summaryCounts.total}</td>
-                                        <td className="px-5 py-4">{summaryCounts.active}</td>
-                                        <td className="px-5 py-4">{summaryCounts.expiring}</td>
-                                        <td className="px-5 py-4">{summaryCounts.expired}</td>
-                                        <td className="px-5 py-4">{summaryCounts.unknown}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    ) : (
-                        /* Detailed records table */
-                        <div className="overflow-x-auto">
-                            <table className="min-w-[850px] w-full text-left text-sm">
-                                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                                    <tr>
-                                        <th className="px-5 py-3 font-semibold">S. No.</th>
-                                        <th className="px-5 py-3 font-semibold">Product / Record</th>
-                                        <th className="px-5 py-3 font-semibold">Type</th>
-                                        <th className="px-5 py-3 font-semibold">Company / Vendor</th>
-                                        <th className="px-5 py-3 font-semibold">Start Date</th>
-                                        <th className="px-5 py-3 font-semibold">Expiry Date</th>
-                                        <th className="px-5 py-3 font-semibold">Status</th>
-                                    </tr>
-                                </thead>
+                                <div>
+                                    <label className="mb-1 block text-xs font-medium text-slate-600">
+                                        Expiry To
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={toDate}
+                                        min={fromDate || undefined}
+                                        onChange={(e) => setToDate(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                            </div>
 
-                                <tbody className="divide-y divide-slate-100">
-                                    {loadingData ? (
-                                        <tr>
-                                            <td
-                                                colSpan={7}
-                                                className="px-5 py-12 text-center text-slate-500"
-                                            >
-                                                Loading records...
-                                            </td>
-                                        </tr>
-                                    ) : filteredRecords.length === 0 ? (
-                                        <tr>
-                                            <td
-                                                colSpan={7}
-                                                className="px-5 py-12 text-center text-slate-500"
-                                            >
-                                                No records found for the selected report and filters.
-                                            </td>
-                                        </tr>
-                                    ) : (
-                                        visibleRecords.map((record, index) => (
-                                            <tr
-                                                key={`${record.module}-${record.id}`}
-                                                className="transition hover:bg-slate-50"
-                                            >
-                                                <td className="px-5 py-4 text-slate-500">
-                                                    {index + 1}
-                                                </td>
-                                                <td className="px-5 py-4 font-semibold text-slate-800">
-                                                    {record.productName}
-                                                </td>
-                                                <td className="px-5 py-4">
-                                                    <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
-                                                        {record.module}
-                                                    </span>
-                                                </td>
-                                                <td className="px-5 py-4 text-slate-600">
-                                                    {record.companyName}
-                                                </td>
-                                                <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                                                    {formatDate(record.startDate)}
-                                                </td>
-                                                <td className="whitespace-nowrap px-5 py-4 text-slate-700">
-                                                    {formatDate(record.expiryDate)}
-                                                </td>
-                                                <td className="px-5 py-4">
-                                                    <span
-                                                        className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${record.status === "Active"
-                                                            ? "bg-emerald-50 text-emerald-700"
-                                                            : record.status === "Expiring Soon"
-                                                                ? "bg-amber-50 text-amber-700"
-                                                                : record.status === "Expired"
-                                                                    ? "bg-red-50 text-red-700"
-                                                                    : "bg-slate-100 text-slate-600"
-                                                            }`}
-                                                    >
-                                                        {record.status}
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                        ))
-                                    )}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-
-                    {selectedReport !== "summary" &&
-                        !loadingData &&
-                        filteredRecords.length > 10 && (
-                            <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-5 py-4">
+                            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                                 <p className="text-xs text-slate-500">
-                                    Showing {visibleRecords.length} of {filteredRecords.length} records
+                                    Showing {filteredRecords.length} matching report entries
                                 </p>
 
                                 <button
                                     type="button"
-                                    onClick={() => setShowAll((previous) => !previous)}
-                                    className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-50"
+                                    onClick={clearFilters}
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
                                 >
-                                    {showAll ? "Show Less" : "View All"}
+                                    Clear Filters
                                 </button>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 border-b border-slate-100 p-4 sm:grid-cols-4">
+                            {[
+                                ["Total Records", summaryCounts.total, "text-slate-900"],
+                                ["Active", summaryCounts.active, "text-emerald-700"],
+                                ["Expiring Soon", summaryCounts.expiring, "text-amber-700"],
+                                ["Expired", summaryCounts.expired, "text-red-700"],
+                            ].map(([label, value, color]) => (
+                                <div
+                                    key={label}
+                                    className="rounded-xl border border-slate-200 bg-white p-3"
+                                >
+                                    <p className="text-xs text-slate-500">{label}</p>
+                                    <p className={`mt-1 text-xl font-bold ${color}`}>
+                                        {value}
+                                    </p>
+                                </div>
+                            ))}
+                        </div>
+
+                        {selectedReport === "summary" ? (
+                            <div className="overflow-x-auto">
+                                <table className="min-w-[700px] w-full text-left text-sm">
+                                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                                        <tr>
+                                            {[
+                                                "Module",
+                                                "Total Records",
+                                                "Active",
+                                                "Expiring Soon",
+                                                "Expired",
+                                                "Unknown",
+                                            ].map((heading) => (
+                                                <th
+                                                    key={heading}
+                                                    className="px-5 py-3 font-semibold"
+                                                >
+                                                    {heading}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+
+                                    <tbody className="divide-y divide-slate-100">
+                                        {MODULES.map((module) => {
+                                            const counts = getModuleCounts(module);
+
+                                            return (
+                                                <tr
+                                                    key={module}
+                                                    className="transition hover:bg-slate-50"
+                                                >
+                                                    <td className="px-5 py-4 font-semibold text-slate-800">
+                                                        {module}
+                                                    </td>
+                                                    <td className="px-5 py-4">{counts.total}</td>
+                                                    <td className="px-5 py-4">{counts.active}</td>
+                                                    <td className="px-5 py-4">{counts.expiring}</td>
+                                                    <td className="px-5 py-4">{counts.expired}</td>
+                                                    <td className="px-5 py-4">{counts.unknown}</td>
+                                                </tr>
+                                            );
+                                        })}
+
+                                        <tr className="bg-slate-50 font-bold">
+                                            <td className="px-5 py-4">TOTAL</td>
+                                            <td className="px-5 py-4">{summaryCounts.total}</td>
+                                            <td className="px-5 py-4">{summaryCounts.active}</td>
+                                            <td className="px-5 py-4">{summaryCounts.expiring}</td>
+                                            <td className="px-5 py-4">{summaryCounts.expired}</td>
+                                            <td className="px-5 py-4">{summaryCounts.unknown}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="min-w-[1050px] w-full text-left text-sm">
+                                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                                        <tr>
+                                            <th className="px-5 py-3 font-semibold">S. No.</th>
+                                            <th className="px-5 py-3 font-semibold">Product / Record</th>
+                                            <th className="px-5 py-3 font-semibold">Module</th>
+                                            <th className="px-5 py-3 font-semibold">Company / Vendor</th>
+                                            <th className="px-5 py-3 font-semibold">Start Date</th>
+                                            <th className="px-5 py-3 font-semibold">Expiry Date</th>
+                                            <th className="px-5 py-3 font-semibold">Amount</th>
+                                            <th className="px-5 py-3 font-semibold">Status</th>
+                                        </tr>
+                                    </thead>
+
+                                    <tbody className="divide-y divide-slate-100">
+                                        {loadingData ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-5 py-12 text-center text-slate-500">
+                                                    Loading records...
+                                                </td>
+                                            </tr>
+                                        ) : filteredRecords.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={8} className="px-5 py-12 text-center text-slate-500">
+                                                    No records found for the selected report and filters.
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            visibleRecords.map((record, index) => (
+                                                <tr
+                                                    key={record.id}
+                                                    className="transition hover:bg-slate-50"
+                                                >
+                                                    <td className="px-5 py-4 text-slate-500">
+                                                        {index + 1}
+                                                    </td>
+                                                    <td className="px-5 py-4 font-semibold text-slate-800">
+                                                        {record.productName}
+                                                    </td>
+                                                    <td className="px-5 py-4">
+                                                        <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                                            {record.moduleLabel}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-5 py-4 text-slate-600">
+                                                        {record.companyName}
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-5 py-4 text-slate-600">
+                                                        {formatDate(record.startDate)}
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-5 py-4 text-slate-700">
+                                                        {formatDate(record.expiryDate)}
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-5 py-4 text-slate-700">
+                                                        {record.amount}
+                                                    </td>
+                                                    <td className="px-5 py-4">
+                                                        <span
+                                                            className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${record.status === "Active"
+                                                                ? "bg-emerald-50 text-emerald-700"
+                                                                : record.status === "Expiring Soon"
+                                                                    ? "bg-amber-50 text-amber-700"
+                                                                    : record.status === "Expired"
+                                                                        ? "bg-red-50 text-red-700"
+                                                                        : "bg-slate-100 text-slate-600"
+                                                                }`}
+                                                        >
+                                                            {record.status}
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
                             </div>
                         )}
 
-                    <div className="border-t border-slate-100 px-5 py-3">
-                        <p className="text-xs text-slate-500">
-                            Reports include matching database records based on the selected filters.
-                        </p>
-                    </div>
+                        {selectedReport !== "summary" &&
+                            !loadingData &&
+                            filteredRecords.length > 10 && (
+                                <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-5 py-4">
+                                    <p className="text-xs text-slate-500">
+                                        Showing {visibleRecords.length} of {filteredRecords.length} report entries
+                                    </p>
 
-                    {/* Print-only report */}
-                    <div className="reports-print-area">
-                        <h1 className="text-xl font-bold text-black">
-                            AMIN INTERNATIONAL LIMITED
-                        </h1>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowAll((previous) => !previous)}
+                                        className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-50"
+                                    >
+                                        {showAll ? "Show Less" : "View All"}
+                                    </button>
+                                </div>
+                            )}
 
-                        <h2 className="mt-2 text-lg font-semibold text-black">
-                            {reportTitle}
-                        </h2>
+                        <div className="border-t border-slate-100 px-5 py-3">
+                            <p className="text-xs text-slate-500">
+                                Machinery Service Due and AMC Expiry are shown as separate report entries. Amounts are shown only where the module has a corresponding cost field.
+                            </p>
+                        </div>
 
-                        <p className="mt-1 text-sm text-black">
-                            {reportSubtitle}
-                        </p>
+                        <div className="reports-print-area">
+                            <h1 className="text-xl font-bold text-black">
+                                AMIN INTERNATIONAL LIMITED
+                            </h1>
 
-                        <p className="mb-4 mt-1 text-xs text-black">
-                            Generated: {new Date().toLocaleString("en-IN")}
-                            {" | "}
-                            Total matching records: {filteredRecords.length}
-                        </p>
+                            <h2 className="mt-2 text-lg font-semibold text-black">
+                                {reportTitle}
+                            </h2>
 
-                        {selectedReport === "summary" ? (
-                            <table className="print-table">
-                                <thead>
-                                    <tr>
-                                        <th>Module</th>
-                                        <th>Total Records</th>
-                                        <th>Active</th>
-                                        <th>Expiring Soon</th>
-                                        <th>Expired</th>
-                                        <th>Unknown</th>
-                                    </tr>
-                                </thead>
+                            <p className="mt-1 text-sm text-black">
+                                {reportSubtitle}
+                            </p>
 
-                                <tbody>
-                                    {MODULES.map((module) => {
-                                        const counts = getModuleCounts(module);
+                            <p className="mb-4 mt-1 text-xs text-black">
+                                Generated: {new Date().toLocaleString("en-IN")}
+                                {" | "}
+                                Total matching report entries: {filteredRecords.length}
+                            </p>
 
-                                        return (
-                                            <tr key={module}>
-                                                <td>{module}</td>
-                                                <td>{counts.total}</td>
-                                                <td>{counts.active}</td>
-                                                <td>{counts.expiring}</td>
-                                                <td>{counts.expired}</td>
-                                                <td>{counts.unknown}</td>
-                                            </tr>
-                                        );
-                                    })}
-
-                                    <tr>
-                                        <th>TOTAL</th>
-                                        <th>{summaryCounts.total}</th>
-                                        <th>{summaryCounts.active}</th>
-                                        <th>{summaryCounts.expiring}</th>
-                                        <th>{summaryCounts.expired}</th>
-                                        <th>{summaryCounts.unknown}</th>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        ) : (
-                            <table className="print-table">
-                                <thead>
-                                    <tr>
-                                        <th>S. No.</th>
-                                        <th>Product / Record</th>
-                                        <th>Type</th>
-                                        <th>Company / Vendor</th>
-                                        <th>Start Date</th>
-                                        <th>Expiry Date</th>
-                                        <th>Status</th>
-                                        <th>Amount</th>
-                                    </tr>
-                                </thead>
-
-                                <tbody>
-                                    {filteredRecords.map((record, index) => (
-                                        <tr key={`${record.module}-${record.id}`}>
-                                            <td>{index + 1}</td>
-                                            <td>{record.productName}</td>
-                                            <td>{record.module}</td>
-                                            <td>{record.companyName}</td>
-                                            <td>{formatDate(record.startDate)}</td>
-                                            <td>{formatDate(record.expiryDate)}</td>
-                                            <td>{record.status}</td>
-                                            <td>{getAmount(record.raw)}</td>
+                            {selectedReport === "summary" ? (
+                                <table className="print-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Module</th>
+                                            <th>Total Records</th>
+                                            <th>Active</th>
+                                            <th>Expiring Soon</th>
+                                            <th>Expired</th>
+                                            <th>Unknown</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        )}
-                    </div>
+                                    </thead>
 
-                    <style jsx global>{`
+                                    <tbody>
+                                        {MODULES.map((module) => {
+                                            const counts = getModuleCounts(module);
+
+                                            return (
+                                                <tr key={module}>
+                                                    <td>{module}</td>
+                                                    <td>{counts.total}</td>
+                                                    <td>{counts.active}</td>
+                                                    <td>{counts.expiring}</td>
+                                                    <td>{counts.expired}</td>
+                                                    <td>{counts.unknown}</td>
+                                                </tr>
+                                            );
+                                        })}
+
+                                        <tr>
+                                            <th>TOTAL</th>
+                                            <th>{summaryCounts.total}</th>
+                                            <th>{summaryCounts.active}</th>
+                                            <th>{summaryCounts.expiring}</th>
+                                            <th>{summaryCounts.expired}</th>
+                                            <th>{summaryCounts.unknown}</th>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            ) : (
+                                <table className="print-table">
+                                    <thead>
+                                        <tr>
+                                            <th>S. No.</th>
+                                            <th>Product / Record</th>
+                                            <th>Module</th>
+                                            <th>Company / Vendor</th>
+                                            <th>Start Date</th>
+                                            <th>Expiry Date</th>
+                                            <th>Amount</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+
+                                    <tbody>
+                                        {filteredRecords.map((record, index) => (
+                                            <tr key={record.id}>
+                                                <td>{index + 1}</td>
+                                                <td>{record.productName}</td>
+                                                <td>{record.moduleLabel}</td>
+                                                <td>{record.companyName}</td>
+                                                <td>{formatDate(record.startDate)}</td>
+                                                <td>{formatDate(record.expiryDate)}</td>
+                                                <td>{record.amount}</td>
+                                                <td>{record.status}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+
+                        <style jsx global>{`
                         .reports-print-area {
                             display: none;
                         }
@@ -1003,8 +1177,9 @@ export default function ReportsPage() {
                             }
                         }
                     `}</style>
-                </section>
-            )}
-        </div>
+                    </section>
+                )}
+            </div>
+        </main>
     );
 }

@@ -30,8 +30,6 @@ service cloud.firestore {
       return userData().role;
     }
 
-    // Super Admin must have an active Firestore profile
-    // with the exact Super Admin role.
     function isSuperAdmin() {
       return isActiveUser()
         && userRole() == "Super Admin";
@@ -94,7 +92,6 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-
       allow get: if signedIn()
         && (
           request.auth.uid == userId
@@ -137,6 +134,49 @@ service cloud.firestore {
       allow read: if canReadRecords();
       allow create, update: if canEditRecords();
       allow delete: if isSuperAdmin();
+    }
+
+    // Machinery Module
+    match /machinery_records/{documentId} {
+      allow read: if canReadRecords();
+      allow create, update: if canEditRecords();
+      allow delete: if isSuperAdmin();
+    }
+
+        // Renewal History - Common Collection
+    match /renewal_history/{historyId} {
+
+      // Active users with record access can view renewal history
+      allow read: if canReadRecords();
+
+      // Admin, Editor and Super Admin can create renewal history
+      allow create: if canEditRecords()
+        && request.resource.data.keys().hasAll([
+          "moduleName",
+          "collectionName",
+          "recordId",
+          "previousData",
+          "renewalData",
+          "renewedAt",
+          "renewedBy",
+          "createdAt"
+        ])
+        && request.resource.data.moduleName is string
+        && request.resource.data.collectionName in [
+          "it_devices",
+          "vehicles",
+          "insurance_policies",
+          "compliance_records",
+          "machinery_records"
+        ]
+        && request.resource.data.recordId is string
+        && request.resource.data.previousData is map
+        && request.resource.data.renewalData is map
+        && request.resource.data.renewedAt == request.time
+        && request.resource.data.createdAt == request.time;
+
+      // History entries cannot be modified or deleted
+      allow update, delete: if false;
     }
   }
 }

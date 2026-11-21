@@ -43,16 +43,21 @@ function getModule(record) {
         return "Compliance";
     }
 
-    if (record._source === "vehicles") {
-        const type = String(record.type || record.category || "").toLowerCase();
-        return type.includes("pollution") ? "Pollution" : "Insurance";
+    if (record._source === "machinery_records") {
+        return "Machinery";
     }
 
-    const type = String(record.type || record.category || "").toLowerCase();
+    const values = `${record.type || ""} ${record.category || ""}`.toLowerCase();
 
-    if (type.includes("warranty")) return "Warranty";
-    if (type.includes("software")) return "Software License";
-    if (type.includes("amc")) return "AMC";
+    if (record._source === "vehicles") {
+        if (values.includes("pollution")) return "Pollution";
+        if (values.includes("service")) return "Service";
+        return "Insurance";
+    }
+
+    if (values.includes("warranty")) return "Warranty";
+    if (values.includes("software")) return "Software License";
+    if (values.includes("amc")) return "AMC";
 
     return "IT Devices";
 }
@@ -69,11 +74,11 @@ function getExpiryDate(record) {
     } else if (module === "Compliance") {
         fields = ["validTill", "validUntil", "validTillDate", "expiryDate", "endDate"];
     } else if (module === "AMC") {
-        fields = ["endDate"];
+        fields = ["endDate", "expiryDate"];
     } else if (module === "Warranty") {
         fields = ["warrantyExpiry", "warrantyExpired", "endDate", "expiryDate"];
     } else if (module === "Software License") {
-        fields = ["expiryDate"];
+        fields = ["expiryDate", "endDate"];
     } else {
         fields = ["endDate", "expiryDate"];
     }
@@ -150,10 +155,89 @@ function getCompany(record) {
     );
 }
 
-function getStatus(daysRemaining) {
+// CREATE DASHBOARD EVENTS FOR NEW MODULES
+function createDashboardEvents(record) {
+    const module = getModule(record);
+
+    if (module === "Machinery") {
+        const events = [];
+
+        const machineName =
+            record.machineName ||
+            record.machineNo ||
+            record.machineNumber ||
+            "Unnamed Machinery";
+
+        const serviceDueDate =
+            record.nextDueDate ||
+            record.nextServiceDueDate;
+
+        if (serviceDueDate) {
+            events.push({
+                id: `${record.id}-service-due`,
+                source: record._source,
+                productName: machineName,
+                companyName: record.serviceProvider || "—",
+                module: "Machinery Service",
+                startDate: toDate(record.lastServiceDate),
+                expiryDate: toDate(serviceDueDate),
+            });
+        }
+
+        if (
+            String(record.amcApplicable || "").trim().toLowerCase() === "yes" &&
+            record.amcEndDate
+        ) {
+            events.push({
+                id: `${record.id}-amc-expiry`,
+                source: record._source,
+                productName: machineName,
+                companyName: record.amcVendor || "—",
+                module: "Machinery AMC",
+                startDate: toDate(record.amcStartDate),
+                expiryDate: toDate(record.amcEndDate),
+            });
+        }
+
+        return events;
+    }
+
+    if (module === "Service") {
+        return [
+            {
+                id: `${record.id}-vehicle-service`,
+                source: record._source,
+                productName:
+                    record.vehicleNo ||
+                    record.vehicleNumber ||
+                    record.vehicleName ||
+                    "Unnamed Vehicle",
+                companyName: record.serviceCentre || "—",
+                module: "Service",
+                startDate: toDate(record.lastServiceDate),
+                expiryDate: toDate(record.nextServiceDueDate),
+            },
+        ];
+    }
+
+    // Existing modules retain their original mapping.
+    return [
+        {
+            id: record.id,
+            source: record._source,
+            productName: getProductName(record),
+            companyName: getCompany(record),
+            module,
+            startDate: getStartDate(record),
+            expiryDate: getExpiryDate(record),
+        },
+    ];
+}
+
+function getStatus(daysRemaining, thresholdDays) {
     if (daysRemaining === null) return "Unknown";
     if (daysRemaining < 0) return "Expired";
-    if (daysRemaining <= 10) return "Expiring Soon";
+    if (daysRemaining <= thresholdDays) return "Expiring Soon";
     return "Active";
 }
 
@@ -212,7 +296,14 @@ function SummaryCard({ title, value, description, icon, accent }) {
 }
 
 export default function Dashboard() {
-    const { search, records, loadingData, dataError } = useDashboardShell();
+    const {
+        search,
+        records,
+        loadingData,
+        dataError,
+    } = useDashboardShell();
+
+    const expiringSoonDays = 10;
 
     const [expiryTypeFilter, setExpiryTypeFilter] = useState("All");
     const [expirySearch, setExpirySearch] = useState("");
@@ -234,32 +325,33 @@ export default function Dashboard() {
     }, [todayKey]);
 
     const allRecords = useMemo(() => {
-        return records.map((record) => {
-            const expiryDate = getExpiryDate(record);
-            const startDate = getStartDate(record);
-            const daysRemaining = getDaysRemaining(expiryDate);
+        return records.flatMap((record) => {
+            return createDashboardEvents(record).map((event) => {
+                const daysRemaining = getDaysRemaining(event.expiryDate);
 
-            return {
-                id: record.id,
-                productName: getProductName(record),
-                companyName: getCompany(record),
-                module: getModule(record),
-                startDate,
-                expiryDate,
-                daysRemaining,
-                status: getStatus(daysRemaining),
-            };
+                return {
+                    ...event,
+                    recordId: record.id,
+                    daysRemaining,
+                    status: getStatus(daysRemaining, expiringSoonDays),
+                };
+            });
         });
-    }, [records, todayKey]);
+    }, [records, todayKey, expiringSoonDays]);
 
     const summary = useMemo(() => ({
-        total: allRecords.length,
+        // Count actual database records, not separate Machinery events.
+        total: new Set(
+            allRecords.map(
+                (record) => `${record.source}-${record.recordId}`
+            )
+        ).size,
 
         expiringSoon: allRecords.filter(
             (record) =>
                 record.daysRemaining !== null &&
                 record.daysRemaining >= 0 &&
-                record.daysRemaining <= 10
+                record.daysRemaining <= expiringSoonDays
         ).length,
 
         expired: allRecords.filter(
@@ -271,7 +363,7 @@ export default function Dashboard() {
         active: allRecords.filter(
             (record) =>
                 record.daysRemaining !== null &&
-                record.daysRemaining > 10
+                record.daysRemaining > expiringSoonDays
         ).length,
     }), [allRecords]);
 
@@ -287,8 +379,21 @@ export default function Dashboard() {
                     record.daysRemaining <= 30
             )
             .filter((record) => {
-                if (expiryTypeFilter !== "All" &&
-                    record.module !== expiryTypeFilter) {
+                if (
+                    expiryTypeFilter === "Machinery" &&
+                    ![
+                        "Machinery Service",
+                        "Machinery AMC",
+                    ].includes(record.module)
+                ) {
+                    return false;
+                }
+
+                if (
+                    expiryTypeFilter !== "All" &&
+                    expiryTypeFilter !== "Machinery" &&
+                    record.module !== expiryTypeFilter
+                ) {
                     return false;
                 }
 
@@ -330,200 +435,204 @@ export default function Dashboard() {
     };
 
     return (
-        <div className="w-full min-w-0 space-y-6">
-            <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-                        Dashboard
-                    </h2>
-                    <p className="mt-1 text-sm text-slate-500">
-                        Overview of company records and upcoming expiries.
+        <main className="min-h-screen bg-slate-100 p-4 sm:p-6 lg:p-8">
+            <div className="mx-auto max-w-[1600px] space-y-6">
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                        <h2 className="mt-1 text-3xl font-bold text-slate-900">
+                            Dashboard
+                        </h2>
+                        <p className="mt-2 text-sm text-slate-500">
+                            Overview of company records and upcoming expiries.
+                        </p>
+                    </div>
+
+                    <p className="text-xs text-slate-500">
+                        Expiry overview · Next 30 days
                     </p>
                 </div>
 
-                <p className="text-xs text-slate-500">
-                    Expiry overview · Next 30 days
-                </p>
-            </div>
-
-            {dataError && (
-                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                    {dataError}
-                </div>
-            )}
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <SummaryCard
-                    title="Total Records"
-                    value={loadingData ? "—" : summary.total}
-                    description="Across all tracked modules"
-                    icon="▦"
-                    accent="bg-blue-50 text-blue-700"
-                />
-
-                <SummaryCard
-                    title="Expiring Soon"
-                    value={loadingData ? "—" : summary.expiringSoon}
-                    description="Expiry within the next 10 days"
-                    icon="◷"
-                    accent="bg-amber-50 text-amber-700"
-                />
-
-                <SummaryCard
-                    title="Expired"
-                    value={loadingData ? "—" : summary.expired}
-                    description="Records past their expiry date"
-                    icon="!"
-                    accent="bg-red-50 text-red-700"
-                />
-
-                <SummaryCard
-                    title="Active"
-                    value={loadingData ? "—" : summary.active}
-                    description="More than 10 days remaining"
-                    icon="✓"
-                    accent="bg-emerald-50 text-emerald-700"
-                />
-            </div>
-
-            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div className="flex flex-col gap-2 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <h3 className="text-base font-bold text-slate-900">
-                            Upcoming Expiries
-                        </h3>
-                        <p className="mt-1 text-sm text-slate-500">
-                            Records expiring within the next 30 days, nearest
-                            expiry first.
-                        </p>
+                {dataError && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                        {dataError}
                     </div>
+                )}
 
-                    <span className="inline-flex w-fit items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                        {loadingData ? "Loading..." : `${visibleUpcomingRecords.length} of ${upcomingRecords.length} records`}
-                    </span>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                    <SummaryCard
+                        title="Total Records"
+                        value={loadingData ? "—" : summary.total}
+                        description="Across all tracked modules"
+                        icon="▦"
+                        accent="bg-blue-50 text-blue-700"
+                    />
+
+                    <SummaryCard
+                        title="Expiring Soon"
+                        value={loadingData ? "—" : summary.expiringSoon}
+                        description="Expiry within the next 10 days"
+                        icon="◷"
+                        accent="bg-amber-50 text-amber-700"
+                    />
+
+                    <SummaryCard
+                        title="Expired"
+                        value={loadingData ? "—" : summary.expired}
+                        description="Records past their expiry date"
+                        icon="!"
+                        accent="bg-red-50 text-red-700"
+                    />
+
+                    <SummaryCard
+                        title="Active"
+                        value={loadingData ? "—" : summary.active}
+                        description="More than 10 days remaining"
+                        icon="✓"
+                        accent="bg-emerald-50 text-emerald-700"
+                    />
                 </div>
 
-                <div className="border-b border-slate-100 bg-slate-50/60 p-4">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                        <input
-                            type="text"
-                            value={expirySearch}
-                            onChange={(e) => setExpirySearch(e.target.value)}
-                            placeholder="Search product or company..."
-                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                        />
+                <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <div className="flex flex-col gap-2 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h3 className="text-base font-bold text-slate-900">
+                                Upcoming Expiries
+                            </h3>
+                            <p className="mt-1 text-sm text-slate-500">
+                                Records expiring within the next 30 days, nearest
+                                expiry first.
+                            </p>
+                        </div>
 
-                        <select
-                            value={expiryTypeFilter}
-                            onChange={(e) => setExpiryTypeFilter(e.target.value)}
-                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                        >
-                            <option value="All">All Types</option>
-                            <option value="AMC">AMC</option>
-                            <option value="Warranty">Warranty</option>
-                            <option value="Insurance">Insurance</option>
-                            <option value="Pollution">Pollution</option>
-                            <option value="Software License">Software License</option>
-                            <option value="Compliance">Compliance</option>
-                        </select>
+                        <span className="inline-flex w-fit items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                            {loadingData ? "Loading..." : `${visibleUpcomingRecords.length} of ${upcomingRecords.length} records`}
+                        </span>
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-xs text-slate-500">
-                            Showing {visibleUpcomingRecords.length} of {upcomingRecords.length} matching records
-                        </p>
+                    <div className="border-b border-slate-100 bg-slate-50/60 p-4">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
+                            <input
+                                type="text"
+                                value={expirySearch}
+                                onChange={(e) => setExpirySearch(e.target.value)}
+                                placeholder="Search product or company..."
+                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                            />
 
-                        <button
-                            type="button"
-                            onClick={clearExpiryFilters}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
-                        >
-                            Clear Filters
-                        </button>
+                            <select
+                                value={expiryTypeFilter}
+                                onChange={(e) => setExpiryTypeFilter(e.target.value)}
+                                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                            >
+                                <option value="All">All Modules</option>
+                                <option value="AMC">AMC</option>
+                                <option value="Warranty">Warranty</option>
+                                <option value="Insurance">Insurance</option>
+                                <option value="Pollution">Pollution</option>
+                                <option value="Software License">Software License</option>
+                                <option value="Compliance">Compliance</option>
+                                <option value="Machinery">Machinery</option>
+                                <option value="Service">Service</option>
+                            </select>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs text-slate-500">
+                                Showing {visibleUpcomingRecords.length} of {upcomingRecords.length} matching records
+                            </p>
+
+                            <button
+                                type="button"
+                                onClick={clearExpiryFilters}
+                                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+                            >
+                                Clear Filters
+                            </button>
+                        </div>
                     </div>
-                </div>
 
-                <div className="overflow-x-auto">
-                    <table className="min-w-[900px] w-full text-left text-sm">
-                        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                            <tr>
-                                <th className="px-5 py-3 font-semibold">S. No.</th>
-                                <th className="px-5 py-3 font-semibold">Product / Record</th>
-                                <th className="px-5 py-3 font-semibold">Module</th>
-                                <th className="px-5 py-3 font-semibold">Company / Vendor</th>
-                                <th className="px-5 py-3 font-semibold">Start Date</th>
-                                <th className="px-5 py-3 font-semibold">Expiry Date</th>
-                                <th className="px-5 py-3 font-semibold">Status</th>
-                            </tr>
-                        </thead>
-
-                        <tbody className="divide-y divide-slate-100">
-                            {loadingData ? (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-[900px] w-full text-left text-sm">
+                            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
-                                    <td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-500">
-                                        Loading records...
-                                    </td>
+                                    <th className="px-5 py-3 font-semibold">S. No.</th>
+                                    <th className="px-5 py-3 font-semibold">Product / Record</th>
+                                    <th className="px-5 py-3 font-semibold">Module</th>
+                                    <th className="px-5 py-3 font-semibold">Company / Vendor</th>
+                                    <th className="px-5 py-3 font-semibold">Start Date</th>
+                                    <th className="px-5 py-3 font-semibold">Expiry Date</th>
+                                    <th className="px-5 py-3 font-semibold">Status</th>
                                 </tr>
-                            ) : visibleUpcomingRecords.length === 0 ? (
-                                <tr>
-                                    <td colSpan={7} className="px-5 py-12 text-center">
-                                        <div className="text-2xl text-slate-300">✓</div>
-                                        <p className="mt-2 font-semibold text-slate-700">
-                                            No upcoming expiries found
-                                        </p>
-                                        <p className="mt-1 text-sm text-slate-500">
-                                            Records expiring in the next 30 days will appear here.
-                                        </p>
-                                    </td>
-                                </tr>
-                            ) : (
-                                visibleUpcomingRecords.map((record, index) => (
-                                    <tr
-                                        key={`${record.module}-${record.id}`}
-                                        className="transition hover:bg-slate-50"
-                                    >
-                                        <td className="px-5 py-4 text-slate-500">
-                                            {index + 1}
-                                        </td>
+                            </thead>
 
-                                        <td className="px-5 py-4 font-semibold text-slate-800">
-                                            {record.productName}
-                                        </td>
-
-                                        <td className="px-5 py-4">
-                                            <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
-                                                {record.module}
-                                            </span>
-                                        </td>
-
-                                        <td className="px-5 py-4 text-slate-600">
-                                            {record.companyName}
-                                        </td>
-
-                                        <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                                            {formatDate(record.startDate)}
-                                        </td>
-
-                                        <td className="whitespace-nowrap px-5 py-4 font-medium text-slate-700">
-                                            {formatDate(record.expiryDate)}
-                                        </td>
-
-                                        <td className="px-5 py-4">
-                                            <StatusBadge status={record.status} />
+                            <tbody className="divide-y divide-slate-100">
+                                {loadingData ? (
+                                    <tr>
+                                        <td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-500">
+                                            Loading records...
                                         </td>
                                     </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
+                                ) : visibleUpcomingRecords.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={7} className="px-5 py-12 text-center">
+                                            <div className="text-2xl text-slate-300">✓</div>
+                                            <p className="mt-2 font-semibold text-slate-700">
+                                                No upcoming expiries found
+                                            </p>
+                                            <p className="mt-1 text-sm text-slate-500">
+                                                Records expiring in the next 30 days will appear here.
+                                            </p>
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    visibleUpcomingRecords.map((record, index) => (
+                                        <tr
+                                            key={`${record.source}-${record.id}`}
+                                            className="transition hover:bg-slate-50"
+                                        >
+                                            <td className="px-5 py-4 text-slate-500">
+                                                {index + 1}
+                                            </td>
 
-                <div className="border-t border-slate-100 px-5 py-3">
-                    <p className="text-xs text-slate-500">
-                        Showing up to 10 upcoming records. Use the search and module filters to narrow the results.
-                    </p>
-                </div>
-            </section>
-        </div>
+                                            <td className="px-5 py-4 font-semibold text-slate-800">
+                                                {record.productName}
+                                            </td>
+
+                                            <td className="px-5 py-4">
+                                                <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                                    {record.module}
+                                                </span>
+                                            </td>
+
+                                            <td className="px-5 py-4 text-slate-600">
+                                                {record.companyName}
+                                            </td>
+
+                                            <td className="whitespace-nowrap px-5 py-4 text-slate-600">
+                                                {formatDate(record.startDate)}
+                                            </td>
+
+                                            <td className="whitespace-nowrap px-5 py-4 font-medium text-slate-700">
+                                                {formatDate(record.expiryDate)}
+                                            </td>
+
+                                            <td className="px-5 py-4">
+                                                <StatusBadge status={record.status} />
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div className="border-t border-slate-100 px-5 py-3">
+                        <p className="text-xs text-slate-500">
+                            Showing up to 10 upcoming records. Use the search and module filters to narrow the results.
+                        </p>
+                    </div>
+                </section>
+            </div>
+        </main>
     );
 }

@@ -9,8 +9,6 @@ import {
 
 export const runtime = "nodejs";
 
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
-
 function normalizeRole(role) {
     return String(role || "")
         .toLowerCase()
@@ -77,10 +75,10 @@ export async function POST(request) {
         const caller = callerSnap.data();
 
         const callerIsSuperAdmin =
-            decoded.uid === SUPER_ADMIN_UID ||
+            caller.active === true &&
             normalizeRole(caller.role) === "superadmin";
 
-        if (!callerIsSuperAdmin || caller.active !== true) {
+        if (!callerIsSuperAdmin) {
             return NextResponse.json(
                 {
                     error: "Only an active Super Admin can delete users.",
@@ -88,7 +86,6 @@ export async function POST(request) {
                 { status: 403 }
             );
         }
-
         // 3. Validate target user
         let body;
 
@@ -130,18 +127,6 @@ export async function POST(request) {
                     error: "You cannot delete your own account.",
                 },
                 { status: 400 }
-            );
-        }
-
-
-
-        // Protect the fixed Super Admin account.
-        if (userId === SUPER_ADMIN_UID) {
-            return NextResponse.json(
-                {
-                    error: "The primary Super Admin account cannot be deleted.",
-                },
-                { status: 403 }
             );
         }
 

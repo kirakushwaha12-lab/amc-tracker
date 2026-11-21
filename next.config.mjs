@@ -1,6 +1,10 @@
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "export",
+  experimental: {
+    agentUpgrade: "security",
+  },
   turbopack: {
     rules: {
       "*.css": {

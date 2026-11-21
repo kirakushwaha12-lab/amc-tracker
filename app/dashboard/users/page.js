@@ -502,15 +502,17 @@ export default function UsersPage() {
             const token =
                 await auth.currentUser.getIdToken();
 
-            const response = await fetch("/api/users/delete", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({ userId: item.id }),
-            });
-
+            const response = await fetch(
+                "https://ail-ocr-api.kirakushwaha12.workers.dev/users/delete",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({ userId: item.id }),
+                }
+            );
             const result = await response.json();
 
             if (!response.ok) {

@@ -23,9 +23,9 @@ import {
     extractDocumentFields,
     mergeExtractedFields,
 } from "../../lib/document-ocr";
-
+import { renewRecord } from "../../lib/renewal-history";
+import RenewalHistory from "../../components/RenewalHistory";
 const BLUE = "#0b4da2";
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 
 const initialForm = {
     productName: "",
@@ -36,6 +36,7 @@ const initialForm = {
     startDate: "",
     expiryDate: "",
     amount: "",
+    remarks: "",
 };
 
 function formatDate(value) {
@@ -187,6 +188,10 @@ export default function InsurancePage() {
     const router = useRouter();
 
     const [policies, setPolicies] = useState([]);
+
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
     const [loading, setLoading] = useState(true);
     const [userChecked, setUserChecked] = useState(false);
     const [error, setError] = useState("");
@@ -200,6 +205,8 @@ export default function InsurancePage() {
     const [periodFilter, setPeriodFilter] = useState("All");
 
     const [editingId, setEditingId] = useState(null);
+    const [renewingId, setRenewingId] = useState(null);
+    const [showHistory, setShowHistory] = useState(false);
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
@@ -231,7 +238,6 @@ export default function InsurancePage() {
             setLoading(true);
 
             try {
-                const isFixedSuperAdmin = user.uid === SUPER_ADMIN_UID;
                 const userSnapshot = await getDoc(
                     doc(db, "users", user.uid)
                 );
@@ -244,15 +250,13 @@ export default function InsurancePage() {
 
                 const role = String(userData.role ?? "")
                     .trim()
-                    .toLowerCase();
+                    .toLowerCase()
+                    .replace(/[\s_-]+/g, "");
 
-                const isActive =
-                    userData.active === true || isFixedSuperAdmin;
+                const isActive = userData.active === true;
 
                 const superAdmin =
-                    isFixedSuperAdmin ||
-                    (isActive &&
-                        (role === "super admin" || role === "superadmin"));
+                    isActive && role === "superadmin";
 
                 const canEdit =
                     superAdmin ||
@@ -343,7 +347,19 @@ export default function InsurancePage() {
             unsubscribePolicies?.();
         };
     }, [router]);
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
 
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
     const counts = useMemo(() => {
         const total = policies.length;
 
@@ -360,7 +376,7 @@ export default function InsurancePage() {
         ).length;
 
         return { total, active, expiring, expired };
-    }, [policies]);
+    }, [policies, todayKey]);
 
     const expiryOverview = useMemo(() => {
         const today = new Date();
@@ -393,7 +409,7 @@ export default function InsurancePage() {
         });
 
         return { overdue, next10, next30 };
-    }, [policies]);
+    }, [policies, todayKey]);
 
     const filteredPolicies = useMemo(() => {
         const queryText = search.trim().toLowerCase();
@@ -404,6 +420,7 @@ export default function InsurancePage() {
                 policy.productId,
                 policy.policyNo,
                 policy.companyVendor,
+                policy.remarks,
             ].some((value) =>
                 String(value || "").toLowerCase().includes(queryText)
             );
@@ -446,7 +463,7 @@ export default function InsurancePage() {
 
             return matchesSearch && matchesStatus && matchesPeriod;
         });
-    }, [policies, search, statusFilter, periodFilter]);
+    }, [policies, search, statusFilter, periodFilter, todayKey]);
 
     function openAddForm() {
         if (!canEditRecords) {
@@ -455,6 +472,7 @@ export default function InsurancePage() {
         }
 
         setEditingId(null);
+        setRenewingId(null);
         setForm({ ...initialForm });
         setFormError("");
         setSelectedDocument(null);
@@ -473,6 +491,7 @@ export default function InsurancePage() {
         }
 
         setEditingId(policy.id);
+        setRenewingId(null);
 
         setForm({
             productName: policy.productName ?? "",
@@ -483,6 +502,7 @@ export default function InsurancePage() {
             startDate: policy.startDate ?? "",
             expiryDate: policy.expiryDate ?? "",
             amount: String(policy.amount ?? ""),
+            remarks: policy.remarks ?? "",
         });
 
 
@@ -624,7 +644,46 @@ export default function InsurancePage() {
         }
     }
 
+    function openRenewForm(policy) {
+        if (!canEditRecords) {
+            setError("You do not have permission to renew Insurance records.");
+            return;
+        }
 
+        setEditingId(null);
+        setRenewingId(policy.id);
+
+        setForm({
+            productName: policy.productName ?? "",
+            productId: policy.productId ?? "",
+            policyNo: "",
+            renewalDate: "",
+            companyVendor: policy.companyVendor ?? "",
+            startDate: "",
+            expiryDate: "",
+            amount: "",
+            remarks: "",
+        });
+
+        setExistingDocument(
+            policy.documentData
+                ? {
+                    name: policy.documentName || "Saved document",
+                    data: policy.documentData,
+                    size: policy.documentSize || 0,
+                    type: policy.documentType || "",
+                }
+                : null
+        );
+
+        setSelectedDocument(null);
+        setDocumentError("");
+        setFormError("");
+        setError("");
+        setNotice("");
+        setOcrStatus("");
+        setShowForm(true);
+    }
     async function handleSubmit(event) {
         event.preventDefault();
         setFormError("");
@@ -689,6 +748,7 @@ export default function InsurancePage() {
                 startDate: form.startDate,
                 expiryDate: form.expiryDate,
                 amount: Number(form.amount),
+                remarks: form.remarks.trim(),
                 updatedAt: serverTimestamp(),
             };
 
@@ -710,7 +770,7 @@ export default function InsurancePage() {
                     documentSize: existingDocument.size || 0,
                     documentType: existingDocument.type || "",
                 };
-            } else if (editingId) {
+            } else if (editingId || renewingId) {
                 documentFields = {
                     documentData: deleteField(),
                     documentName: deleteField(),
@@ -719,25 +779,49 @@ export default function InsurancePage() {
                 };
             }
 
-            if (editingId) {
-                await updateDoc(doc(db, "vehicles", editingId), {
-                    ...recordData,
-                    ...documentFields,
+            if (renewingId) {
+                await renewRecord({
+                    collectionName: "vehicles",
+                    recordId: renewingId,
+                    moduleName: "Insurance",
+                    renewalData: {
+                        ...recordData,
+                        ...documentFields,
+                    },
+                    actor: {
+                        uid: auth.currentUser?.uid || "",
+                        email: auth.currentUser?.email || "",
+                        displayName: auth.currentUser?.displayName || "",
+                    },
                 });
+
+                setNotice("Insurance renewed successfully.");
+            } else if (editingId) {
+                await updateDoc(
+                    doc(db, "vehicles", editingId),
+                    {
+                        ...recordData,
+                        ...documentFields,
+                    }
+                );
 
                 setNotice("Insurance record updated successfully.");
             } else {
-                await addDoc(collection(db, "vehicles"), {
-                    ...recordData,
-                    ...documentFields,
-                    createdAt: serverTimestamp(),
-                });
+                await addDoc(
+                    collection(db, "vehicles"),
+                    {
+                        ...recordData,
+                        ...documentFields,
+                        createdAt: serverTimestamp(),
+                    }
+                );
 
-                setNotice("Insurance record added successfully.");
+                setNotice("Insurance record saved successfully.");
             }
 
             setForm({ ...initialForm });
             setEditingId(null);
+            setRenewingId(null);
             setShowForm(false);
             setSelectedDocument(null);
             setExistingDocument(null);
@@ -749,9 +833,11 @@ export default function InsurancePage() {
             setFormError(
                 err.code === "permission-denied"
                     ? "Permission denied. Please check Firestore security rules."
-                    : editingId
-                        ? "Insurance record could not be updated. Please try again."
-                        : "Insurance record could not be saved. Please try again."
+                    : renewingId
+                        ? "Insurance record could not be renewed. Please try again."
+                        : editingId
+                            ? "Insurance record could not be updated. Please try again."
+                            : "Insurance record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -807,14 +893,25 @@ export default function InsurancePage() {
                     </div>
 
                     {canEditRecords && (
-                        <button
-                            type="button"
-                            onClick={openAddForm}
-                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                            style={{ backgroundColor: BLUE }}
-                        >
-                            + Add Insurance
-                        </button>
+                        <div className="flex flex-wrap gap-3">
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Insurance Record
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setShowHistory(true)}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                Renewal History
+                            </button>
+                        </div>
                     )}
                 </div>
 
@@ -976,6 +1073,7 @@ export default function InsurancePage() {
                                             "Start Date",
                                             "Expiry Date",
                                             "Amount",
+                                            "Remarks",
                                             "Status",
                                             "Actions",
                                         ].map((heading) => (
@@ -1031,6 +1129,12 @@ export default function InsurancePage() {
                                                 {money(policy.amount)}
                                             </td>
 
+                                            <td className="max-w-[220px] px-4 py-4 text-slate-600">
+                                                <span title={policy.remarks || ""}>
+                                                    {policy.remarks || "—"}
+                                                </span>
+                                            </td>
+
                                             <td className="whitespace-nowrap px-4 py-4">
                                                 <StatusBadge status={getPolicyStatus(policy)} />
                                             </td>
@@ -1046,7 +1150,16 @@ export default function InsurancePage() {
                                                             Edit
                                                         </button>
                                                     )}
-
+                                                    {canEditRecords && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openRenewForm(policy)}
+                                                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                                                            style={{ backgroundColor: BLUE }}
+                                                        >
+                                                            Renew
+                                                        </button>
+                                                    )}
                                                     {policy.documentData && (
                                                         <button
                                                             type="button"
@@ -1084,7 +1197,7 @@ export default function InsurancePage() {
 
                                     {filteredPolicies.length === 0 && (
                                         <tr>
-                                            <td colSpan={11} className="px-5 py-12 text-center">
+                                            <td colSpan={12} className="px-5 py-12 text-center">
                                                 <p className="font-medium text-slate-700">
                                                     No insurance records found
                                                 </p>
@@ -1108,7 +1221,11 @@ export default function InsurancePage() {
                             <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white p-5">
                                 <div>
                                     <h2 className="text-xl font-bold text-slate-900">
-                                        {editingId ? "Edit Insurance" : "Add Insurance"}
+                                        {renewingId
+                                            ? "Renew Insurance"
+                                            : editingId
+                                                ? "Edit Insurance"
+                                                : "Add Insurance"}
                                     </h2>
                                     <p className="mt-1 text-sm text-slate-500">
                                         Enter the details below.
@@ -1121,6 +1238,12 @@ export default function InsurancePage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        setEditingId(null);
+                                        setRenewingId(null);
+                                        setSelectedDocument(null);
+                                        setExistingDocument(null);
+                                        setDocumentError("");
+                                        setOcrStatus("");
                                     }}
                                     className="rounded-lg px-3 py-2 text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
                                 >
@@ -1350,7 +1473,19 @@ export default function InsurancePage() {
                                             </p>
                                         )}
                                     </div>
-
+                                    <div className="sm:col-span-2">
+                                        <label className="mb-1 block text-sm font-medium text-slate-700">
+                                            Remarks
+                                        </label>
+                                        <textarea
+                                            name="remarks"
+                                            value={form.remarks}
+                                            onChange={handleChange}
+                                            rows={3}
+                                            placeholder="Enter remarks (optional)"
+                                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal outline-none focus:border-blue-500"
+                                        />
+                                    </div>
                                     {formError && (
                                         <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">
                                             {formError}
@@ -1365,6 +1500,12 @@ export default function InsurancePage() {
                                         onClick={() => {
                                             setShowForm(false);
                                             setFormError("");
+                                            setEditingId(null);
+                                            setRenewingId(null);
+                                            setSelectedDocument(null);
+                                            setExistingDocument(null);
+                                            setDocumentError("");
+                                            setOcrStatus("");
                                         }}
                                         className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                                     >
@@ -1378,17 +1519,27 @@ export default function InsurancePage() {
                                         style={{ backgroundColor: BLUE }}
                                     >
                                         {saving
-                                            ? editingId
-                                                ? "Updating..."
-                                                : "Saving..."
-                                            : editingId
-                                                ? "Update Record"
-                                                : "Save Record"}
+                                            ? renewingId
+                                                ? "Renewing..."
+                                                : editingId
+                                                    ? "Updating..."
+                                                    : "Saving..."
+                                            : renewingId
+                                                ? "Renew Record"
+                                                : editingId
+                                                    ? "Update Record"
+                                                    : "Save Record"}
                                     </button>
                                 </div>
                             </form>
                         </div>
                     </div>
+                )}
+                {showHistory && (
+                    <RenewalHistory
+                        moduleName="Insurance"
+                        onClose={() => setShowHistory(false)}
+                    />
                 )}
             </div>
         </main >

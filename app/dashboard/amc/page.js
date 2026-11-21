@@ -17,12 +17,14 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "../../../lib/firebase";
 import {
+    recognizeDocumentImage,
     extractDocumentFields,
-    mergeExtractedFields,
+    mergeExtractedFields
 } from "../../lib/document-ocr";
+import { renewRecord } from "../../lib/renewal-history";
 
+import RenewalHistory from "../../components/RenewalHistory";
 const BLUE = "#0b4da2";
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
 
 function getDays(endDate) {
     if (!endDate) return null;
@@ -142,9 +144,17 @@ async function compressImageIfNeeded(file) {
         maxSizeMB: 0.2,
         maxWidthOrHeight: 1600,
         useWebWorker: true,
+        fileType: file.type || undefined,
     });
 
-    return compressedFile.size < file.size ? compressedFile : file;
+    if (compressedFile.size >= file.size) {
+        return file;
+    }
+
+    return new File([compressedFile], file.name, {
+        type: compressedFile.type || file.type,
+        lastModified: Date.now(),
+    });
 }
 
 function readDocumentAsDataUrl(file) {
@@ -435,7 +445,11 @@ export default function AMCPage() {
     const [isSuperAdmin, setIsSuperAdmin] = useState(false);
     const [canEditRecords, setCanEditRecords] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
-
+    const [renewingId, setRenewingId] = useState(null);
+    const [showHistory, setShowHistory] = useState(false);
+    const [todayKey, setTodayKey] = useState(
+        () => new Date().toDateString()
+    );
     useEffect(() => {
         let unsubscribeRecords;
         let cancelled = false;
@@ -457,7 +471,6 @@ export default function AMCPage() {
             setError("");
 
             try {
-                const isFixedSuperAdmin = user.uid === SUPER_ADMIN_UID;
                 const userRef = doc(db, "users", user.uid);
                 const userSnapshot = await getDoc(userRef);
 
@@ -469,15 +482,13 @@ export default function AMCPage() {
 
                 const role = String(userData.role ?? "")
                     .trim()
-                    .toLowerCase();
+                    .toLowerCase()
+                    .replace(/[\s_-]+/g, "");
 
-                const isActive =
-                    userData.active === true || isFixedSuperAdmin;
+                const isActive = userData.active === true;
 
                 const superAdmin =
-                    isFixedSuperAdmin ||
-                    (isActive &&
-                        (role === "super admin" || role === "superadmin"));
+                    isActive && role === "superadmin";
 
                 const canEdit =
                     superAdmin ||
@@ -555,7 +566,19 @@ export default function AMCPage() {
             unsubscribeRecords?.();
         };
     }, [router]);
+    // REFRESH DATE CALCULATIONS AT MIDNIGHT
+    useEffect(() => {
+        const now = new Date();
+        const nextMidnight = new Date(now);
 
+        nextMidnight.setHours(24, 0, 1, 0);
+
+        const timer = window.setTimeout(() => {
+            setTodayKey(new Date().toDateString());
+        }, nextMidnight.getTime() - now.getTime());
+
+        return () => window.clearTimeout(timer);
+    }, [todayKey]);
     const preparedRecords = useMemo(
         () =>
             records.map((record) => {
@@ -586,7 +609,7 @@ export default function AMCPage() {
                     status: getStatus(endDate),
                 };
             }),
-        [records]
+        [records, todayKey]
     );
 
     const counts = useMemo(() => {
@@ -655,6 +678,7 @@ export default function AMCPage() {
         setNotice("");
         setError("");
         setShowForm(true);
+        setRenewingId(null);
     }
 
     function openEditForm(record) {
@@ -671,7 +695,7 @@ export default function AMCPage() {
             startDate: record.startDate || "",
             endDate: record.endDate || "",
             vendor: record.vendor || "",
-            cost: String(record.cost ?? ""),
+            cost: String(record.cost ?? record.charges ?? ""),
             branchUnit: record.branchUnit || "",
             remarks: record.remarks || "",
         });
@@ -695,6 +719,7 @@ export default function AMCPage() {
         setNotice("");
         setError("");
         setShowForm(true);
+        setRenewingId(null);
     }
 
 
@@ -702,7 +727,39 @@ export default function AMCPage() {
         const { name, value } = event.target;
         setForm((current) => ({ ...current, [name]: value }));
     }
+    function openRenewForm(record) {
+        setEditingId(null);
+        setRenewingId(record.id);
 
+        setForm({
+            productName: record.productName || "",
+            productId: record.productId || "",
+            startDate: record.startDate || "",
+            endDate: record.endDate || "",
+            vendor: record.vendor || "",
+            cost: record.cost ?? "",
+            branchUnit: record.branchUnit || "",
+            remarks: record.remarks || "",
+        });
+
+        setSelectedDocument(null);
+
+        setExistingDocument(
+            record.documentData
+                ? {
+                    documentData: record.documentData,
+                    documentName: record.documentName || "",
+                    documentSize: record.documentSize || "",
+                    documentType: record.documentType || "",
+                }
+                : null
+        );
+        setNotice("");
+        setError("");
+        setFormError("");
+        setOcrStatus("");
+        setShowForm(true);
+    }
     async function handleDocumentChange(event) {
         const input = event.target;
         const file = input.files?.[0];
@@ -740,9 +797,16 @@ export default function AMCPage() {
 
             // Retain the selected document even if OCR processing fails.
             setSelectedDocument(processedFile);
+            const fileExtension = getDocumentExtension(file.name);
+
+            console.log("AMC OCR file check:", {
+                name: processedFile.name,
+                type: processedFile.type,
+                extension: fileExtension,
+            });
 
             const ocrSupported = ["jpg", "jpeg", "png", "pdf"].includes(
-                getDocumentExtension(processedFile.name)
+                fileExtension
             );
 
             if (!ocrSupported) {
@@ -757,28 +821,8 @@ export default function AMCPage() {
             try {
                 console.log("Original file:", file.name, file.type);
                 console.log("Processed file:", processedFile.name, processedFile.type);
-                const ocrFormData = new FormData();
 
-                ocrFormData.append(
-                    "file",
-                    processedFile,
-                    processedFile.name
-                );
-
-                const ocrResponse = await fetch("/api/ocr", {
-                    method: "POST",
-                    body: ocrFormData,
-                });
-
-                const ocrData = await ocrResponse.json();
-
-                if (!ocrResponse.ok || !ocrData.success) {
-                    throw new Error(
-                        ocrData.error || "AMC document OCR failed."
-                    );
-                }
-
-                const rawText = ocrData.text || "";
+                const rawText = await recognizeDocumentImage(processedFile);
                 console.log("========== AMC RAW OCR TEXT ==========");
                 console.log(rawText);
                 console.log("======================================");
@@ -859,7 +903,8 @@ export default function AMCPage() {
             !form.productName.trim() ||
             !form.vendor.trim() ||
             !form.startDate ||
-            !form.endDate
+            !form.endDate ||
+            !form.branchUnit.trim()
         ) {
             setFormError("Please fill in all required fields marked with *.");
             return;
@@ -919,7 +964,7 @@ export default function AMCPage() {
                     documentSize: existingDocument.documentSize || 0,
                     documentType: existingDocument.documentType || "",
                 };
-            } else if (editingId) {
+            } else if (editingId || renewingId) {
                 documentFields = {
                     documentData: deleteField(),
                     documentName: deleteField(),
@@ -934,7 +979,27 @@ export default function AMCPage() {
             return;
         }
         try {
-            if (editingId) {
+            if (renewingId) {
+                await renewRecord({
+                    collectionName: "it_devices",
+                    recordId: renewingId,
+                    moduleName: "AMC",
+                    renewalData: {
+                        ...recordData,
+                        ...documentFields,
+                    },
+                    actor: {
+                        uid: auth.currentUser?.uid || "",
+                        email: auth.currentUser?.email || "",
+                        displayName: auth.currentUser?.displayName || "",
+                    },
+                });
+
+                setNotice(
+                    "AMC renewed successfully. Previous details saved in Renewal History."
+                );
+
+            } else if (editingId) {
                 await updateDoc(
                     doc(db, "it_devices", editingId),
                     {
@@ -942,34 +1007,40 @@ export default function AMCPage() {
                         ...documentFields,
                     }
                 );
+
                 setNotice("AMC record updated successfully.");
+
             } else {
                 await addDoc(collection(db, "it_devices"), {
                     ...recordData,
                     ...documentFields,
                     createdAt: serverTimestamp(),
                 });
+
                 setNotice("AMC record saved successfully.");
             }
 
             setShowForm(false);
             setForm(initialForm);
             setEditingId(null);
+            setRenewingId(null);
             setFormError("");
             setOcrStatus("");
             setSelectedDocument(null);
             setExistingDocument(null);
 
             window.setTimeout(() => setNotice(""), 3500);
+
         } catch (err) {
             console.error("AMC record save/update error:", err);
-
             setFormError(
                 err.code === "permission-denied"
                     ? "Permission denied. Please check Firestore security rules."
-                    : editingId
-                        ? "AMC record could not be updated. Please try again."
-                        : "AMC record could not be saved. Please try again."
+                    : renewingId
+                        ? "AMC renewal could not be completed. Please try again."
+                        : editingId
+                            ? "AMC record could not be updated. Please try again."
+                            : "AMC record could not be saved. Please try again."
             );
         } finally {
             setSaving(false);
@@ -1024,16 +1095,29 @@ export default function AMCPage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <button
-                            type="button"
-                            onClick={openAddForm}
-                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                            style={{ backgroundColor: BLUE }}
-                        >
-                            + Add AMC
-                        </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                        {canEditRecords && (
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add AMC Record
+                            </button>
+                        )}
+
+                        {canEditRecords && (
+                            <button
+                                type="button"
+                                onClick={() => setShowHistory(true)}
+                                className="inline-flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                Renewal History
+                            </button>
+                        )}
+                    </div>
                 </div>
 
                 {notice && (
@@ -1262,7 +1346,16 @@ export default function AMCPage() {
                                                             Edit
                                                         </button>
                                                     )}
-
+                                                    {canEditRecords && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openRenewForm(record)}
+                                                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                                                            style={{ backgroundColor: BLUE }}
+                                                        >
+                                                            Renew
+                                                        </button>
+                                                    )}
                                                     {isSuperAdmin && (
                                                         <button
                                                             type="button"
@@ -1313,15 +1406,24 @@ export default function AMCPage() {
                         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
                             <div>
                                 <h2 className="text-lg font-bold text-slate-900">
-                                    {editingId ? "Edit AMC Record" : "Add AMC Record"}
+                                    {renewingId
+                                        ? "Renew AMC Record"
+                                        : editingId
+                                            ? "Edit AMC Record"
+                                            : "Add AMC Record"}
                                 </h2>
                                 <p className="mt-1 text-sm text-slate-500">
-                                    Enter the required AMC details. Product ID, Branch and Remarks are optional.
+                                    Enter the required AMC details. Product ID and Remarks are optional.
                                 </p>
                             </div>
                             <button
                                 type="button"
-                                onClick={() => setShowForm(false)}
+                                onClick={() => {
+                                    setShowForm(false);
+                                    setFormError("");
+                                    setEditingId(null);
+                                    setRenewingId(null);
+                                }}
                                 disabled={saving}
                                 className="rounded-lg px-3 py-2 text-xl text-slate-500 hover:bg-slate-100"
                             >
@@ -1412,8 +1514,9 @@ export default function AMCPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Branch / Unit
+                                Branch / Unit *
                                 <input
+                                    required
                                     name="branchUnit"
                                     data-ocr-aliases="Branch Name|Unit Name|Location|Site"
                                     value={form.branchUnit}
@@ -1422,19 +1525,6 @@ export default function AMCPage() {
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
                                 />
                             </label>
-
-                            <label className="text-sm font-medium text-slate-700 sm:col-span-2">
-                                Remarks
-                                <textarea
-                                    name="remarks"
-                                    value={form.remarks}
-                                    onChange={updateForm}
-                                    rows={3}
-                                    placeholder="Enter remarks (optional)"
-                                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
-                                />
-                            </label>
-
 
                             <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 sm:col-span-2">
                                 <label className="block text-sm font-semibold text-slate-800">
@@ -1529,6 +1619,17 @@ export default function AMCPage() {
                                 )}
                             </div>
 
+                            <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                                Remarks
+                                <textarea
+                                    name="remarks"
+                                    value={form.remarks}
+                                    onChange={updateForm}
+                                    rows={3}
+                                    placeholder="Enter remarks (optional)"
+                                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
+                                />
+                            </label>
 
                             {formError && (
                                 <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">
@@ -1542,6 +1643,8 @@ export default function AMCPage() {
                                     onClick={() => {
                                         setShowForm(false);
                                         setFormError("");
+                                        setEditingId(null);
+                                        setRenewingId(null);
                                     }}
                                     disabled={saving}
                                     className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700"
@@ -1555,17 +1658,27 @@ export default function AMCPage() {
                                     style={{ backgroundColor: BLUE }}
                                 >
                                     {saving
-                                        ? editingId
-                                            ? "Updating..."
-                                            : "Saving..."
-                                        : editingId
-                                            ? "Update AMC"
-                                            : "Save AMC"}
+                                        ? renewingId
+                                            ? "Renewing..."
+                                            : editingId
+                                                ? "Updating..."
+                                                : "Saving..."
+                                        : renewingId
+                                            ? "Renew AMC"
+                                            : editingId
+                                                ? "Update AMC"
+                                                : "Save AMC"}
                                 </button>
                             </div>
                         </form>
                     </div>
                 </div>
+            )}
+            {showHistory && (
+                <RenewalHistory
+                    moduleName="AMC"
+                    onClose={() => setShowHistory(false)}
+                />
             )}
         </main>
     );
