@@ -23,7 +23,11 @@ jobs:
       - name: Install dependencies
         working-directory: functions
         run: npm ci
-
+      - name: Check Firebase Project ID
+        run: |
+          node -e 'const s = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON); console.log("Firebase Project ID:", s.project_id)'
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
       - name: Send expiry reminders
         working-directory: functions
         run: node send-expiry-reminders.js
