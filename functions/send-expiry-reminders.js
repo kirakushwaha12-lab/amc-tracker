@@ -3,41 +3,22 @@ const admin = require("firebase-admin");
 const { Resend } = require("resend");
 const crypto = require("node:crypto");
 
-const serviceAccount = JSON.parse(
-    process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}"
-);
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}");
+if (!serviceAccount.project_id) throw new Error("Missing Firebase service account configuration.");
+if (!process.env.RESEND_API_KEY) throw new Error("Missing RESEND_API_KEY.");
+if (!process.env.EMAIL_FROM) throw new Error("Missing EMAIL_FROM.");
 
-if (!serviceAccount.project_id) {
-    throw new Error("Missing Firebase service account configuration.");
-}
+const TEST_MODE = String(process.env.TEST_MODE || "true").toLowerCase() !== "false";
+const TEST_EMAIL = String(process.env.TEST_EMAIL || "").trim().toLowerCase();
+const FORCE_TEST_EMAIL = String(process.env.FORCE_TEST_EMAIL || "false").toLowerCase() === "true";
+const ROUTING_DRY_RUN = String(process.env.ROUTING_DRY_RUN || "false").toLowerCase() === "true";
 
-if (!process.env.RESEND_API_KEY) {
-    throw new Error("Missing RESEND_API_KEY.");
-}
-
-if (!process.env.EMAIL_FROM) {
-    throw new Error("Missing EMAIL_FROM.");
-}
-
-const TEST_MODE =
-    String(process.env.TEST_MODE || "true").toLowerCase() !== "false";
-
-const TEST_EMAIL = String(process.env.TEST_EMAIL || "")
-    .trim()
-    .toLowerCase();
-
-const FORCE_TEST_EMAIL =
-    String(process.env.FORCE_TEST_EMAIL || "false").toLowerCase() === "true";
-const ROUTING_DRY_RUN =
-    String(process.env.ROUTING_DRY_RUN || "false").toLowerCase() === "true";
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const TIME_ZONE = "Asia/Kolkata";
-
-const SUPER_ADMIN_UID = "gm7L9ZxaqOUIm9qBP9Lf2sxDLh92";
-
 const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
 
+// Module names must match app_settings/expiryReminders.moduleOperators keys.
 const MODULE_CONFIG = [
     {
         name: "AMC",
@@ -49,12 +30,7 @@ const MODULE_CONFIG = [
         name: "Warranty",
         collection: "it_devices",
         allowedTypes: ["warranty"],
-        expiryFields: [
-            "warrantyExpiry",
-            "warrantyExpired",
-            "endDate",
-            "expiryDate",
-        ],
+        expiryFields: ["warrantyExpiry", "warrantyExpired", "endDate", "expiryDate"],
     },
     {
         name: "Software License",
@@ -77,24 +53,29 @@ const MODULE_CONFIG = [
     {
         name: "Compliance",
         collection: "compliance_records",
-        allowedTypes: ["compliance"],
-        expiryFields: [
-            "validTill",
-            "validUntil",
-            "validTillDate",
-            "expiryDate",
-            "endDate",
-        ],
+        requiredCategory: "Compliance",
+        requiredType: "Compliance",
+        expiryFields: ["validTill", "validUntil", "validTillDate", "expiryDate", "endDate"],
+    },
+    {
+        name: "Machinery",
+        collection: "machinery_records",
+        requiredCategory: "Machinery",
+        requiredType: "Machinery",
+        expiryFields: ["nextDueDate"],
+        extraExpiryField: "amcEndDate",
+    },
+    {
+        name: "Service",
+        collection: "vehicles",
+        requiredCategory: "Vehicles",
+        requiredType: "Service",
+        expiryFields: ["nextServiceDueDate"],
     },
 ];
 
-if (
-    TEST_MODE &&
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(TEST_EMAIL)
-) {
-    throw new Error(
-        "TEST_MODE is ON. Configure a valid TEST_EMAIL GitHub Secret."
-    );
+if (TEST_MODE && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(TEST_EMAIL)) {
+    throw new Error("TEST_MODE is ON. Configure a valid TEST_EMAIL GitHub Secret.");
 }
 
 admin.initializeApp({
@@ -104,14 +85,10 @@ admin.initializeApp({
 const db = admin.firestore();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// --------------------------------------------------
-// DATE HELPERS
-// --------------------------------------------------
+// -------------------- DATE / VALUE HELPERS --------------------
 
 function dateInIndia(date) {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
-        return "";
-    }
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
 
     const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: TIME_ZONE,
@@ -121,21 +98,15 @@ function dateInIndia(date) {
     }).formatToParts(date);
 
     const values = {};
-
-    for (const part of parts) {
-        values[part.type] = part.value;
-    }
+    for (const part of parts) values[part.type] = part.value;
 
     return `${values.year}-${values.month}-${values.day}`;
 }
 
 function isValidDateString(value) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-        return false;
-    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
 
     const [year, month, day] = value.split("-").map(Number);
-
     const date = new Date(Date.UTC(year, month - 1, day));
 
     return (
@@ -160,13 +131,10 @@ function toDateString(value) {
         }
 
         const parsed = new Date(value);
-
-        return Number.isNaN(parsed.getTime())
-            ? ""
-            : dateInIndia(parsed);
+        return Number.isNaN(parsed.getTime()) ? "" : dateInIndia(parsed);
     }
 
-    if (value && typeof value.toDate === "function") {
+    if (typeof value.toDate === "function") {
         return dateInIndia(value.toDate());
     }
 
@@ -174,10 +142,7 @@ function toDateString(value) {
         return dateInIndia(value);
     }
 
-    if (
-        typeof value === "object" &&
-        Number.isFinite(value.seconds)
-    ) {
+    if (typeof value === "object" && Number.isFinite(value.seconds)) {
         return dateInIndia(new Date(value.seconds * 1000));
     }
 
@@ -196,29 +161,28 @@ function daysBetween(from, to) {
 
 function firstValue(data, keys) {
     for (const key of keys) {
-        const value = data[key];
-
         if (
-            value !== undefined &&
-            value !== null &&
-            value !== ""
+            data[key] !== undefined &&
+            data[key] !== null &&
+            data[key] !== ""
         ) {
-            return value;
+            return data[key];
         }
     }
 
     return "";
 }
 
-// Returns the first valid date, not merely the first non-empty field.
 function firstValidDate(data, keys) {
     for (const key of keys) {
         const date = toDateString(data[key]);
 
-        if (date) return date;
+        if (date) {
+            return { date, field: key };
+        }
     }
 
-    return "";
+    return { date: "", field: "" };
 }
 
 function normalize(value) {
@@ -236,59 +200,42 @@ function isValidEmail(email) {
 }
 
 function displayDate(value) {
-    if (!value || !isValidDateString(value)) {
-        return "Not available";
-    }
+    if (!value || !isValidDateString(value)) return "Not available";
 
     const [year, month, day] = value.split("-");
-
     return `${day}-${month}-${year}`;
 }
 
 function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
         '"': "&quot;",
         "'": "&#39;",
-    })[character]);
+    })[c]);
 }
 
-// --------------------------------------------------
-// REMINDER SETTINGS
-// --------------------------------------------------
+// -------------------- SETTINGS / TIME --------------------
 
 function getReminderDays(settings) {
-    const configured = settings?.reminderDays;
-
-    if (!Array.isArray(configured)) {
+    if (!Array.isArray(settings?.reminderDays)) {
         return DEFAULT_REMINDER_DAYS;
     }
 
-    const valid = configured
+    const valid = settings.reminderDays
         .map(Number)
-        .filter(
-            (day) =>
-                Number.isInteger(day) &&
-                day >= 0 &&
-                day <= 365
-        );
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 365);
 
-    return [...new Set([...valid, 0])]
-        .sort((a, b) => b - a);
+    return [...new Set([...valid, 0])].sort((a, b) => b - a);
 }
 
 function getEmailTime(settings) {
-    const value = String(
-        settings?.emailTime || DEFAULT_EMAIL_TIME
-    ).trim();
+    const value = String(settings?.emailTime || DEFAULT_EMAIL_TIME).trim();
 
-    if (!/^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)) {
-        return DEFAULT_EMAIL_TIME;
-    }
-
-    return value;
+    return /^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)
+        ? value
+        : DEFAULT_EMAIL_TIME;
 }
 
 function getCurrentTimeInIndia() {
@@ -300,10 +247,7 @@ function getCurrentTimeInIndia() {
     }).formatToParts(new Date());
 
     const values = {};
-
-    for (const part of parts) {
-        values[part.type] = part.value;
-    }
+    for (const part of parts) values[part.type] = part.value;
 
     return `${values.hour}:${values.minute}`;
 }
@@ -326,9 +270,7 @@ async function getReminderSettings() {
     return snapshot.exists ? snapshot.data() : {};
 }
 
-// --------------------------------------------------
-// USER DIRECTORY
-// --------------------------------------------------
+// -------------------- USERS --------------------
 
 async function getUserDirectory() {
     const snapshot = await db.collection("users").get();
@@ -340,24 +282,14 @@ async function getUserDirectory() {
     for (const document of snapshot.docs) {
         const data = document.data();
 
-        const email = String(data.email || "")
-            .trim()
-            .toLowerCase();
-
-        // The fixed Super Admin UID is a permanent trusted exception.
-        const isFixedSuperAdmin = document.id === SUPER_ADMIN_UID;
-
-        const active =
-            isFixedSuperAdmin || data.active === true;
-
+        const email = String(data.email || "").trim().toLowerCase();
+        const active = data.active === true;
         const role = normalize(data.role);
 
         const isSuperAdmin =
-            isFixedSuperAdmin ||
-            role === "super admin" ||
-            role === "superadmin";
+            active && ["super admin", "superadmin"].includes(role);
 
-        const isAdmin = role === "admin";
+        const isAdmin = active && role === "admin";
 
         const user = {
             uid: document.id,
@@ -380,68 +312,104 @@ async function getUserDirectory() {
         }
     }
 
-    return {
-        usersByUid,
-        superAdmins,
-        admins,
-    };
+    return { usersByUid, superAdmins, admins };
 }
 
-// --------------------------------------------------
-// READ EXPIRY RECORDS
-// --------------------------------------------------
+// -------------------- MODULE MATCHING --------------------
+
+function matchesModuleRecord(data, config) {
+    // Strict category + type matching for Compliance, Machinery and Service.
+    if (config.requiredCategory || config.requiredType) {
+        const categoryMatches =
+            !config.requiredCategory ||
+            normalize(data.category) === normalize(config.requiredCategory);
+
+        const typeMatches =
+            !config.requiredType ||
+            normalize(data.type) === normalize(config.requiredType);
+
+        return categoryMatches && typeMatches;
+    }
+
+    // Existing matching behavior for other modules.
+    const recordTypes = [
+        data.type,
+        data.category,
+        data.module,
+        data.recordType,
+    ]
+        .filter(Boolean)
+        .map(normalize);
+
+    return recordTypes.some((type) =>
+        config.allowedTypes.includes(type)
+    );
+}
+
+// -------------------- READ RECORDS --------------------
 
 async function readModuleRecords(config, today, reminderDays) {
-    const snapshot = await db
-        .collection(config.collection)
-        .get();
-
+    const snapshot = await db.collection(config.collection).get();
+    if (config.name === "Machinery") {
+        console.log("[DEBUG] Machinery documents:", snapshot.size);
+    }
     const records = [];
 
     for (const document of snapshot.docs) {
         const data = document.data();
-
-        const recordTypes = [
-            data.type,
-            data.category,
-            data.module,
-            data.recordType,
-        ]
-            .filter(Boolean)
-            .map(normalize);
-
-        if (
-            !recordTypes.some((type) =>
-                config.allowedTypes.includes(type)
-            )
-        ) {
+        if (config.name === "Machinery") {
+            console.log("[DEBUG] Machinery record:", {
+                category: data.category,
+                type: data.type,
+                nextDueDate: data.nextDueDate,
+                parsedDate: toDateString(data.nextDueDate),
+            });
+        }
+        if (!matchesModuleRecord(data, config)) {
             continue;
         }
 
-        const expiryDate = firstValidDate(
-            data,
-            config.expiryFields
-        );
+        const primary = firstValidDate(data, config.expiryFields || []);
+        const expiryCandidates = [];
 
-        if (!expiryDate) {
+        if (primary.date) {
+            expiryCandidates.push({
+                expiryDate: primary.date,
+                expiryField: primary.field,
+            });
+        }
+
+        // Machinery AMC end date is a separate reminder.
+        // It is considered only when AMC Applicable is Yes.
+        if (
+            config.extraExpiryField &&
+            normalize(data.amcApplicable) === "yes"
+        ) {
+            const extraDate = toDateString(data[config.extraExpiryField]);
+
+            if (extraDate && extraDate !== primary.date) {
+                expiryCandidates.push({
+                    expiryDate: extraDate,
+                    expiryField: config.extraExpiryField,
+                });
+            }
+        }
+
+        if (!expiryCandidates.length) {
             console.log(
-                `Skipped ${config.name} record ${document.id}: no valid expiry date.`
+                `Skipped ${config.name} record ${document.id}: no valid expiry/due date.`
             );
             continue;
         }
-
-        const daysLeft = daysBetween(today, expiryDate);
-
-        const isDue =
-            daysLeft < 0 || reminderDays.includes(daysLeft);
-
-        if (!isDue) continue;
 
         const title = firstValue(data, [
             "productName",
             "licenseName",
             "product",
             "item",
+            "machineryName",
+            "machineName",
+            "vehicleName",
             "vehicleNo",
             "vehicleNumber",
             "policyNo",
@@ -463,17 +431,27 @@ async function readModuleRecords(config, today, reminderDays) {
             "partnerCompany",
             "pucCentre",
             "pucCenter",
+            "serviceCentre",
+            "serviceCenter",
             "unit",
         ]);
 
-        records.push({
-            id: document.id,
-            module: config.name,
-            title: String(title || "Record"),
-            company: String(company || "Not specified"),
-            expiryDate,
-            daysLeft,
-        });
+        for (const candidate of expiryCandidates) {
+            const daysLeft = daysBetween(today, candidate.expiryDate);
+
+            if (daysLeft < 0 || reminderDays.includes(daysLeft)) {
+                records.push({
+                    id: document.id,
+                    recordKey: `${config.name}_${document.id}_${candidate.expiryField}`,
+                    module: config.name,
+                    title: String(title || "Record"),
+                    company: String(company || "Not specified"),
+                    expiryDate: candidate.expiryDate,
+                    expiryField: candidate.expiryField,
+                    daysLeft,
+                });
+            }
+        }
     }
 
     return records;
@@ -491,9 +469,7 @@ async function getAllExpiryRecords(today, reminderDays) {
         .sort((a, b) => a.daysLeft - b.daysLeft);
 }
 
-// --------------------------------------------------
-// EMAIL CONTENT
-// --------------------------------------------------
+// -------------------- EMAIL CONTENT --------------------
 
 function getReminderLabel(record) {
     if (record.daysLeft < 0) {
@@ -501,10 +477,10 @@ function getReminderLabel(record) {
     }
 
     if (record.daysLeft === 0) {
-        return "EXPIRES TODAY";
+        return "EXPIRES / DUE TODAY";
     }
 
-    return `Expires in ${record.daysLeft} day(s)`;
+    return `Due in ${record.daysLeft} day(s)`;
 }
 
 function buildEmailHtml(records, today, isTest) {
@@ -521,24 +497,16 @@ function buildEmailHtml(records, today, isTest) {
     return `
         <div style="font-family:Arial,sans-serif;color:#1f2937">
             <h2>AMIN INTERNATIONAL LIMITED</h2>
-            <h3>Expiry &amp; Renewal Reminder</h3>
-
-            ${isTest
-            ? "<p><strong>TEST EMAIL:</strong> This message is for testing only. Actual recipient routing is not being tested.</p>"
-            : ""
-        }
-
+            <h3>Company Records &amp; Expiry Tracker</h3>
+            ${isTest ? "<p><strong>TEST EMAIL:</strong> This message is for testing only. Actual recipient routing is not being tested.</p>" : ""}
             <p>Date: ${escapeHtml(displayDate(today))}</p>
-
             <p>
                 ${records.length
             ? "The following records require your attention:"
             : "This is a test email. No reminders are due today."
         }
             </p>
-
-            ${records.length
-            ? `
+            ${records.length ? `
                 <table cellpadding="8" cellspacing="0" border="1"
                     style="border-collapse:collapse;width:100%">
                     <thead>
@@ -546,24 +514,19 @@ function buildEmailHtml(records, today, isTest) {
                             <th>Module</th>
                             <th>Record</th>
                             <th>Company / Vendor / Unit</th>
-                            <th>Expiry Date</th>
+                            <th>Expiry / Due Date</th>
                             <th>Reminder</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
                 </table>
-            `
-            : ""
-        }
-
-            <p>Please review the Expiry &amp; Renewal Tracker as needed.</p>
+            ` : ""}
+            <p>Please review the Company Records &amp; Expiry Tracker as needed.</p>
         </div>
     `;
 }
 
-// --------------------------------------------------
-// DUPLICATE EMAIL PREVENTION
-// --------------------------------------------------
+// -------------------- DUPLICATE PREVENTION --------------------
 
 function getSendLogId(date, email) {
     return crypto
@@ -573,11 +536,9 @@ function getSendLogId(date, email) {
 }
 
 async function claimDailySend(date, email, records) {
-    const logId = getSendLogId(date, email);
-
     const logRef = db
         .collection("email_reminder_logs")
-        .doc(logId);
+        .doc(getSendLogId(date, email));
 
     return db.runTransaction(async (transaction) => {
         const snapshot = await transaction.get(logRef);
@@ -585,7 +546,6 @@ async function claimDailySend(date, email, records) {
         if (snapshot.exists) {
             const existing = snapshot.data();
 
-            // Never automatically resend a previously accepted email.
             if (
                 existing.status === "sent" ||
                 existing.status === "sending"
@@ -598,18 +558,14 @@ async function claimDailySend(date, email, records) {
             }
         }
 
-        transaction.set(
-            logRef,
-            {
-                date,
-                email,
-                status: "sending",
-                modules: [...new Set(records.map((r) => r.module))],
-                recordCount: records.length,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
+        transaction.set(logRef, {
+            date,
+            email,
+            status: "sending",
+            modules: [...new Set(records.map((record) => record.module))],
+            recordCount: records.length,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
 
         return {
             allowed: true,
@@ -617,6 +573,23 @@ async function claimDailySend(date, email, records) {
             status: "sending",
         };
     });
+}
+
+async function markEmailFailed(logRef, error) {
+    try {
+        await logRef.set({
+            status: "failed",
+            error: String(error?.message || "Email send failed").slice(0, 500),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+    } catch (logError) {
+        console.error(
+            "Could not update failed email log:",
+            logError.message
+        );
+    }
+
+    console.error("Email send failed:", error?.message || error);
 }
 
 async function sendOneEmail(email, records, today, isTest) {
@@ -633,8 +606,6 @@ async function sendOneEmail(email, records, today, isTest) {
         ? `TEST — Expiry Reminder (${today})`
         : `Expiry Reminder: ${records.length} record(s) require attention`;
 
-    // Send first. If Resend accepts the email, do not mark it failed
-    // merely because the subsequent Firestore update fails.
     let resendResult;
 
     try {
@@ -653,8 +624,7 @@ async function sendOneEmail(email, records, today, isTest) {
         await markEmailFailed(
             claim.logRef,
             new Error(
-                resendResult.error.message ||
-                "Resend rejected the email."
+                resendResult.error.message || "Resend rejected the email."
             )
         );
         return false;
@@ -671,50 +641,18 @@ async function sendOneEmail(email, records, today, isTest) {
         console.log(`Email accepted by Resend for ${email}.`);
         return true;
     } catch (error) {
-        // Keep status as sending. A retry must not automatically
-        // send a second copy when Resend may already have accepted it.
         console.error(
             `Email was accepted by Resend for ${email}, but the Firestore sent-log update failed. Manual log inspection is required:`,
             error.message
         );
-
         return false;
     }
 }
 
-async function markEmailFailed(logRef, error) {
-    try {
-        await logRef.set(
-            {
-                status: "failed",
-                error: String(
-                    error?.message || "Email send failed"
-                ).slice(0, 500),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
-    } catch (logError) {
-        console.error(
-            "Could not update failed email log:",
-            logError.message
-        );
-    }
-
-    console.error(
-        "Email send failed:",
-        error?.message || error
-    );
-}
-
-// --------------------------------------------------
-// RECIPIENT HELPERS
-// --------------------------------------------------
+// -------------------- ROUTING --------------------
 
 function addRecordToRecipient(recipientMap, email, record) {
-    const normalizedEmail = String(email || "")
-        .trim()
-        .toLowerCase();
+    const normalizedEmail = String(email || "").trim().toLowerCase();
 
     if (!isValidEmail(normalizedEmail)) return;
 
@@ -723,44 +661,33 @@ function addRecordToRecipient(recipientMap, email, record) {
     }
 
     const list = recipientMap.get(normalizedEmail);
+    const key = record.recordKey || `${record.module}_${record.id}`;
 
-    if (!list.some((item) =>
-        item.module === record.module &&
-        item.id === record.id
+    if (!list.some(
+        (item) => (item.recordKey || `${item.module}_${item.id}`) === key
     )) {
         list.push(record);
     }
 }
 
-async function logMissingModuleOperators(
-    date,
-    moduleName,
-    records,
-    reason
-) {
+async function logMissingModuleOperators(date, moduleName, records, reason) {
     const id = crypto
         .createHash("sha256")
         .update(`${date}_${moduleName}_${reason}`)
         .digest("hex");
 
-    await db.collection("reminder_routing_logs").doc(id).set(
-        {
-            date,
-            module: moduleName,
-            reason,
-            recordIds: records.map((record) => record.id),
-            recordCount: records.length,
-            status: "no_operator",
-            fallback: "Super Admin",
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-    );
+    await db.collection("reminder_routing_logs").doc(id).set({
+        date,
+        module: moduleName,
+        reason,
+        recordIds: [...new Set(records.map((record) => record.id))],
+        recordCount: records.length,
+        status: "no_operator",
+        routingNote:
+            "Admins receive all reminder days; Super Admins receive expiry-day and overdue reminders only.",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
 }
-
-// --------------------------------------------------
-// PRODUCTION EMAIL ROUTING
-// --------------------------------------------------
 
 async function buildProductionRecipients(
     records,
@@ -778,6 +705,32 @@ async function buildProductionRecipients(
             ? settings.moduleOperators
             : {};
 
+    // ADMIN: all modules, all configured reminder days and overdue.
+    for (const record of records) {
+        for (const adminUser of admins) {
+            addRecordToRecipient(
+                recipientMap,
+                adminUser.email,
+                record
+            );
+        }
+    }
+
+    // SUPER ADMIN: only expiry day and overdue, across all modules.
+    for (const record of records) {
+        if (record.daysLeft <= 0) {
+            for (const superAdmin of superAdmins) {
+                addRecordToRecipient(
+                    recipientMap,
+                    superAdmin.email,
+                    record
+                );
+            }
+        }
+    }
+
+    // EDITOR: all configured reminder days and overdue,
+    // but only for modules assigned to that Editor.
     for (const config of MODULE_CONFIG) {
         const moduleRecords = records.filter(
             (record) => record.module === config.name
@@ -791,17 +744,16 @@ async function buildProductionRecipients(
             ? [...new Set(operatorsByModule[config.name].map(String))]
             : [];
 
-        const activeOperators = configuredUids
+        const activeEditors = configuredUids
             .map((uid) => usersByUid.get(uid))
-            .filter(
-                (user) =>
-                    user &&
-                    user.active &&
-                    user.normalizedRole === "editor" &&
-                    isValidEmail(user.email)
+            .filter((user) =>
+                user &&
+                user.active &&
+                user.normalizedRole === "editor" &&
+                isValidEmail(user.email)
             );
 
-        if (!activeOperators.length) {
+        if (!activeEditors.length) {
             await logMissingModuleOperators(
                 today,
                 config.name,
@@ -813,65 +765,28 @@ async function buildProductionRecipients(
         }
 
         for (const record of moduleRecords) {
-            const isOverdue = record.daysLeft < 0;
-
-            if (activeOperators.length) {
-                // Upcoming, expiry-day and overdue -> assigned Editors.
-                for (const operator of activeOperators) {
-                    addRecordToRecipient(
-                        recipientMap,
-                        operator.email,
-                        record
-                    );
-                }
-            } else {
-                // No valid Editor -> Super Admin fallback.
-                for (const superAdmin of superAdmins) {
-                    addRecordToRecipient(
-                        recipientMap,
-                        superAdmin.email,
-                        record
-                    );
-                }
-            }
-
-            if (isOverdue) {
-                // Overdue -> all active Admins.
-                for (const adminUser of admins) {
-                    addRecordToRecipient(
-                        recipientMap,
-                        adminUser.email,
-                        record
-                    );
-                }
-
-                // Overdue -> all active Super Admins.
-                for (const superAdmin of superAdmins) {
-                    addRecordToRecipient(
-                        recipientMap,
-                        superAdmin.email,
-                        record
-                    );
-                }
+            for (const editor of activeEditors) {
+                addRecordToRecipient(
+                    recipientMap,
+                    editor.email,
+                    record
+                );
             }
         }
     }
 
+    // VIEWER: intentionally receives no email reminders.
     return recipientMap;
 }
 
-// --------------------------------------------------
-// MAIN
-// --------------------------------------------------
+// -------------------- MAIN --------------------
 
 async function main() {
     const today = getTodayInIndia();
-
     const settings = await getReminderSettings();
 
     const reminderDays = getReminderDays(settings);
     const emailTime = getEmailTime(settings);
-
     const timeCheck = isEmailTimeReached(emailTime);
 
     console.log(
@@ -889,18 +804,14 @@ async function main() {
         return;
     }
 
-    console.log(
-        "Configured email time reached. Checking expiry records..."
-    );
+    console.log("Configured email time reached. Checking expiry records...");
 
-    const records = await getAllExpiryRecords(
-        today,
-        reminderDays
-    );
+    const records = await getAllExpiryRecords(today, reminderDays);
 
     console.log(`Due records found: ${records.length}`);
 
-    // SAFE TEST MODE: never sends to actual users.
+    // SAFE TEST MODE:
+    // Sends only to TEST_EMAIL unless ROUTING_DRY_RUN is enabled.
     if (TEST_MODE && !ROUTING_DRY_RUN) {
         console.log(
             "SAFE TEST MODE is ON. All due records will go only to TEST_EMAIL."
@@ -913,13 +824,7 @@ async function main() {
             return;
         }
 
-        await sendOneEmail(
-            TEST_EMAIL,
-            records,
-            today,
-            true
-        );
-
+        await sendOneEmail(TEST_EMAIL, records, today, true);
         return;
     }
 
@@ -931,7 +836,7 @@ async function main() {
 
     console.log("\n========== ROUTING PREVIEW ==========");
 
-    const preview = await buildProductionRecipients(
+    const recipientMap = await buildProductionRecipients(
         records,
         settings,
         usersByUid,
@@ -940,30 +845,33 @@ async function main() {
         today
     );
 
-    for (const [email, recipientRecords] of preview.entries()) {
+    for (const [email, recipientRecords] of recipientMap.entries()) {
         console.log(`Recipient: ${email}`);
+
         console.log(
             "Records:",
-            recipientRecords.map(
-                (record) => `${record.module}: ${record.title}`
-            ).join(", ")
+            recipientRecords
+                .map((record) =>
+                    `${record.module}: ${record.title} (${getReminderLabel(record)})`
+                )
+                .join(", ")
         );
     }
 
     console.log("========== END ROUTING PREVIEW ==========\n");
+
     if (ROUTING_DRY_RUN) {
         console.log("ROUTING DRY RUN COMPLETE. No emails were sent.");
         return;
     }
+
     console.log(
         `Active Super Admins: ${superAdmins.length}; active Admins: ${admins.length}`
     );
 
-    const recipientMap = preview;
-
     if (!recipientMap.size) {
         console.log(
-            "No eligible recipients for today's reminders. Check reminder_routing_logs and user/module operator settings."
+            "No eligible recipients for today's reminders. Check user roles and module operator settings."
         );
         return;
     }
@@ -971,14 +879,16 @@ async function main() {
     let sentCount = 0;
 
     for (const [email, recipientRecords] of recipientMap.entries()) {
-        const sent = await sendOneEmail(
-            email,
-            recipientRecords,
-            today,
-            false
-        );
-
-        if (sent) sentCount++;
+        if (
+            await sendOneEmail(
+                email,
+                recipientRecords,
+                today,
+                false
+            )
+        ) {
+            sentCount++;
+        }
     }
 
     console.log(
