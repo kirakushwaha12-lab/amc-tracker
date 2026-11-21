@@ -350,21 +350,11 @@ function matchesModuleRecord(data, config) {
 
 async function readModuleRecords(config, today, reminderDays) {
     const snapshot = await db.collection(config.collection).get();
-    if (config.name === "Machinery") {
-        console.log("[DEBUG] Machinery documents:", snapshot.size);
-    }
     const records = [];
 
     for (const document of snapshot.docs) {
         const data = document.data();
-        if (config.name === "Machinery") {
-            console.log("[DEBUG] Machinery record:", {
-                category: data.category,
-                type: data.type,
-                nextDueDate: data.nextDueDate,
-                parsedDate: toDateString(data.nextDueDate),
-            });
-        }
+
         if (!matchesModuleRecord(data, config)) {
             continue;
         }
@@ -502,9 +492,9 @@ function buildEmailHtml(records, today, isTest) {
             <p>Date: ${escapeHtml(displayDate(today))}</p>
             <p>
                 ${records.length
-            ? "The following records require your attention:"
-            : "This is a test email. No reminders are due today."
-        }
+                    ? "The following records require your attention:"
+                    : "This is a test email. No reminders are due today."
+                }
             </p>
             ${records.length ? `
                 <table cellpadding="8" cellspacing="0" border="1"
@@ -701,7 +691,7 @@ async function buildProductionRecipients(
 
     const operatorsByModule =
         settings.moduleOperators &&
-            typeof settings.moduleOperators === "object"
+        typeof settings.moduleOperators === "object"
             ? settings.moduleOperators
             : {};
 
