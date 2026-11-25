@@ -19,6 +19,7 @@ const REPORTS = [
     { value: "summary", label: "All Modules Summary", group: "Summary Reports" },
     { value: "expiring", label: "Expiring Soon Report", group: "Summary Reports" },
     { value: "expired", label: "Expired Records Report", group: "Summary Reports" },
+    { value: "active", label: "Active Records Report", group: "Summary Reports" },
     ...MODULES.map((module) => ({
         value: module,
         label: `${module} Report`,
@@ -88,9 +89,6 @@ function getModule(record) {
     if (values.includes("warranty")) return "Warranty";
     if (values.includes("software")) return "Software License";
     if (values.includes("amc")) return "AMC";
-    if (values.includes("pollution")) return "Pollution";
-    if (values.includes("service")) return "Service";
-
     return "IT Devices";
 }
 
@@ -113,10 +111,10 @@ function getExpiryDate(record, module, eventType) {
         fields = ["endDate", "expiryDate"];
     } else if (module === "Warranty") {
         fields = [
-            "endDate",
-            "expiryDate",
             "warrantyExpiry",
             "warrantyExpired",
+            "endDate",
+            "expiryDate",
         ];
     } else if (module === "Software License") {
         fields = ["expiryDate", "endDate"];
@@ -126,6 +124,8 @@ function getExpiryDate(record, module, eventType) {
             : ["nextDueDate", "nextServiceDueDate"];
     } else if (module === "Service") {
         fields = ["nextServiceDueDate"];
+    } else {
+        fields = ["endDate", "expiryDate"];
     }
 
     for (const field of fields) {
@@ -139,11 +139,11 @@ function getStartDate(record, module, eventType) {
     let fields = [];
 
     if (module === "Pollution") {
-        fields = ["certificateDate"];
+        fields = ["certificateDate", "startDate"]
     } else if (module === "Compliance") {
-        fields = ["examinationDate", "lastExaminationDate"];
+        fields = ["examinationDate", "startDate", "periodDate"]
     } else if (module === "Warranty") {
-        fields = ["purchaseDate", "startDate"];
+        fields = ["startDate", "periodDate", "purchaseDate"]
     } else if (module === "Machinery") {
         fields = eventType === "AMC Expiry"
             ? ["amcStartDate"]
@@ -369,7 +369,7 @@ function createReportEvents(record) {
 
         if (serviceExpiry) {
             events.push({
-                id: `${record.id}-service-due`,
+                id: `${record._source}-${record.id}-service-due`,
                 raw: record,
                 module,
                 moduleLabel: "Machinery Service",
@@ -389,7 +389,7 @@ function createReportEvents(record) {
 
         if (isAmcApplicable && amcExpiry) {
             events.push({
-                id: `${record.id}-amc-expiry`,
+                id: `${record._source}-${record.id}-amc-expiry`,
                 raw: record,
                 module,
                 moduleLabel: "Machinery AMC",
@@ -409,7 +409,7 @@ function createReportEvents(record) {
     const startDate = getStartDate(record, module);
 
     return [{
-        id: record.id,
+        id: `${record._source}-${record.id}`,
         raw: record,
         module,
         moduleLabel: module,
@@ -420,6 +420,25 @@ function createReportEvents(record) {
         expiryDate,
         amount: getAmount(record, module),
     }];
+}
+
+function getRecordKey(record) {
+    return `${record?._source || ""}-${record?.id || ""}`;
+}
+
+function matchesMachineryRecordSearch(record, query) {
+    if (!query) return true;
+
+    const searchableValues = [
+        getProductName(record, "Machinery"),
+        "Machinery",
+        record.serviceProvider,
+        record.amcVendor,
+    ];
+
+    return searchableValues.some((value) =>
+        String(value || "").toLowerCase().includes(query)
+    );
 }
 export default function ReportsPage() {
     const { records = [], loadingData, dataError } = useDashboardShell();
@@ -436,12 +455,33 @@ export default function ReportsPage() {
     const [todayKey, setTodayKey] = useState(
         () => new Date().toDateString()
     );
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const requestedReport = params.get("report");
 
+        const validReports = [
+            "summary",
+            "expiring",
+            "expired",
+            "active",
+        ];
+
+        if (!validReports.includes(requestedReport)) return;
+
+        setReportMode("summary");
+        setSelectedReport(requestedReport);
+        setShowAll(false);
+        setModuleFilter("All");
+        setStatusFilter("All");
+        setSearch("");
+        setFromDate("");
+        setToDate("");
+    }, []);
     useEffect(() => {
         const now = new Date();
         const nextMidnight = new Date(now);
 
-        nextMidnight.setHours(24, 0, 1, 0);
+        nextMidnight.setHours(24, 0, 0, 0);
 
         const timer = window.setTimeout(() => {
             setTodayKey(new Date().toDateString());
@@ -473,7 +513,7 @@ export default function ReportsPage() {
                 !(
                     record.daysRemaining !== null &&
                     record.daysRemaining >= 0 &&
-                    record.daysRemaining <= 30
+                    record.daysRemaining <= 10
                 )
             ) {
                 return false;
@@ -485,7 +525,12 @@ export default function ReportsPage() {
             ) {
                 return false;
             }
-
+            if (
+                selectedReport === "active" &&
+                !(record.daysRemaining !== null && record.daysRemaining > 10)
+            ) {
+                return false;
+            }
             if (
                 MODULES.includes(selectedReport) &&
                 record.module !== selectedReport
@@ -502,6 +547,7 @@ export default function ReportsPage() {
             }
 
             if (
+                reportMode === "module" &&
                 statusFilter !== "All" &&
                 record.status !== statusFilter
             ) {
@@ -546,11 +592,54 @@ export default function ReportsPage() {
         selectedReport,
         moduleFilter,
         statusFilter,
+        reportMode,
         search,
         fromDate,
         toDate,
     ]);
+    const noEventMachineryRecords = useMemo(() => {
+        if (
+            selectedReport !== "summary" ||
+            fromDate ||
+            toDate ||
+            (moduleFilter !== "All" && moduleFilter !== "Machinery")
+        ) {
+            return [];
+        }
 
+        const eventRecordKeys = new Set(
+            normalizedRecords.map((record) =>
+                getRecordKey(record.raw)
+            )
+        );
+
+        const query = search.trim().toLowerCase();
+
+        return records.filter((record) => {
+            if (getModule(record) !== "Machinery") {
+                return false;
+            }
+
+            if (eventRecordKeys.has(getRecordKey(record))) {
+                return false;
+            }
+
+            if (!matchesMachineryRecordSearch(record, query)) {
+                return false;
+            }
+
+            return true;
+        });
+    }, [
+        records,
+        normalizedRecords,
+        selectedReport,
+        statusFilter,
+        fromDate,
+        toDate,
+        moduleFilter,
+        search,
+    ]);
     const clearFilters = () => {
         setModuleFilter("All");
         setStatusFilter("All");
@@ -577,40 +666,95 @@ export default function ReportsPage() {
         selectedReport === "summary"
             ? "Summary of records by module and expiry status"
             : selectedReport === "expiring"
-                ? "Records expiring within the next 30 days"
+                ? "Records expiring within the next 10 days"
                 : selectedReport === "expired"
                     ? "Records past their expiry date"
-                    : `Detailed ${selectedReport} records`;
+                    : selectedReport === "active"
+                        ? "Records with more than 10 days remaining"
+                        : `Detailed ${selectedReport} records`;
+    const summaryCounts = useMemo(() => {
+        const uniqueRecords = new Set(
+            filteredRecords.map((record) =>
+                getRecordKey(record.raw)
+            )
+        );
 
-    const summaryCounts = useMemo(() => ({
-        total: filteredRecords.length,
-        active: filteredRecords.filter((r) => r.status === "Active").length,
-        expiring: filteredRecords.filter((r) => r.status === "Expiring Soon").length,
-        expired: filteredRecords.filter((r) => r.status === "Expired").length,
-        unknown: filteredRecords.filter((r) => r.status === "Unknown").length,
-    }), [filteredRecords]);
+        noEventMachineryRecords.forEach((record) => {
+            uniqueRecords.add(getRecordKey(record));
+        });
+
+        return {
+            total: uniqueRecords.size,
+
+            active: filteredRecords.filter(
+                (r) => r.status === "Active"
+            ).length,
+
+            expiring: filteredRecords.filter(
+                (r) => r.status === "Expiring Soon"
+            ).length,
+
+            expired: filteredRecords.filter(
+                (r) => r.status === "Expired"
+            ).length,
+
+            unknown: filteredRecords.filter(
+                (r) => r.status === "Unknown"
+            ).length,
+        };
+    }, [
+        filteredRecords,
+        selectedReport,
+        noEventMachineryRecords,
+    ]);
 
     const getModuleCounts = (module) => {
         const moduleRecords = filteredRecords.filter(
             (record) => record.module === module
         );
 
+        const uniqueRecords = new Set(
+            moduleRecords.map((record) =>
+                getRecordKey(record.raw)
+            )
+        );
+
+        if (module === "Machinery") {
+            noEventMachineryRecords.forEach((record) => {
+                uniqueRecords.add(getRecordKey(record));
+            });
+        }
+
         return {
-            total: moduleRecords.length,
-            active: moduleRecords.filter((r) => r.status === "Active").length,
-            expiring: moduleRecords.filter((r) => r.status === "Expiring Soon").length,
-            expired: moduleRecords.filter((r) => r.status === "Expired").length,
-            unknown: moduleRecords.filter((r) => r.status === "Unknown").length,
+            total: uniqueRecords.size,
+
+            active: moduleRecords.filter(
+                (r) => r.status === "Active"
+            ).length,
+
+            expiring: moduleRecords.filter(
+                (r) => r.status === "Expiring Soon"
+            ).length,
+
+            expired: moduleRecords.filter(
+                (r) => r.status === "Expired"
+            ).length,
+
+            unknown: moduleRecords.filter(
+                (r) => r.status === "Unknown"
+            ).length,
         };
     };
-
     const handlePrint = () => {
         if (loadingData) {
             window.alert("Please wait until records finish loading.");
             return;
         }
 
-        if (filteredRecords.length === 0) {
+        if (
+            filteredRecords.length === 0 &&
+            !(selectedReport === "summary" && noEventMachineryRecords.length > 0)
+        ) {
             window.alert("No records found for this report and filters.");
             return;
         }
@@ -727,10 +871,12 @@ export default function ReportsPage() {
                                         {report.value === "summary"
                                             ? "Record counts and status by module"
                                             : report.value === "expiring"
-                                                ? "Upcoming expiries in the next 30 days"
+                                                ? "Upcoming expiries in the next 10 days"
                                                 : report.value === "expired"
                                                     ? "Records with past expiry dates"
-                                                    : "View module records and print / save as PDF"}
+                                                    : report.value === "active"
+                                                        ? "Records with more than 10 days remaining"
+                                                        : "View module records and print / save as PDF"}
                                     </span>
                                 </button>
                             ))}
@@ -765,7 +911,13 @@ export default function ReportsPage() {
                                     <button
                                         type="button"
                                         onClick={handlePrint}
-                                        disabled={loadingData || filteredRecords.length === 0}
+                                        disabled={
+                                            loadingData ||
+                                            (
+                                                filteredRecords.length === 0 &&
+                                                !(selectedReport === "summary" && noEventMachineryRecords.length > 0)
+                                            )
+                                        }
                                         className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                                         style={{ backgroundColor: "#0b4da2" }}
                                     >
@@ -800,17 +952,19 @@ export default function ReportsPage() {
                                     </select>
                                 )}
 
-                                <select
-                                    value={statusFilter}
-                                    onChange={(e) => setStatusFilter(e.target.value)}
-                                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-                                >
-                                    <option value="All">All Statuses</option>
-                                    <option value="Active">Active</option>
-                                    <option value="Expiring Soon">Expiring Soon</option>
-                                    <option value="Expired">Expired</option>
-                                    <option value="Unknown">Unknown</option>
-                                </select>
+                                {reportMode === "module" && (
+                                    <select
+                                        value={statusFilter}
+                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                    >
+                                        <option value="All">All Statuses</option>
+                                        <option value="Active">Active</option>
+                                        <option value="Expiring Soon">Expiring Soon</option>
+                                        <option value="Expired">Expired</option>
+                                        <option value="Unknown">Unknown</option>
+                                    </select>
+                                )}
 
                                 <div>
                                     <label className="mb-1 block text-xs font-medium text-slate-600">
@@ -854,23 +1008,13 @@ export default function ReportsPage() {
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3 border-b border-slate-100 p-4 sm:grid-cols-4">
-                            {[
-                                ["Total Records", summaryCounts.total, "text-slate-900"],
-                                ["Active", summaryCounts.active, "text-emerald-700"],
-                                ["Expiring Soon", summaryCounts.expiring, "text-amber-700"],
-                                ["Expired", summaryCounts.expired, "text-red-700"],
-                            ].map(([label, value, color]) => (
-                                <div
-                                    key={label}
-                                    className="rounded-xl border border-slate-200 bg-white p-3"
-                                >
-                                    <p className="text-xs text-slate-500">{label}</p>
-                                    <p className={`mt-1 text-xl font-bold ${color}`}>
-                                        {value}
-                                    </p>
-                                </div>
-                            ))}
+                        <div className="border-b border-slate-100 p-4">
+                            <div className="max-w-xs rounded-xl border border-slate-200 bg-white p-4">
+                                <p className="text-xs text-slate-500">Total Records</p>
+                                <p className="mt-1 text-2xl font-bold text-slate-900">
+                                    {summaryCounts.total}
+                                </p>
+                            </div>
                         </div>
 
                         {selectedReport === "summary" ? (
@@ -960,7 +1104,7 @@ export default function ReportsPage() {
                                         ) : (
                                             visibleRecords.map((record, index) => (
                                                 <tr
-                                                    key={record.id}
+                                                    key={`${record.raw?._source}-${record.id}`}
                                                     className="transition hover:bg-slate-50"
                                                 >
                                                     <td className="px-5 py-4 text-slate-500">
@@ -1048,7 +1192,9 @@ export default function ReportsPage() {
                             <p className="mb-4 mt-1 text-xs text-black">
                                 Generated: {new Date().toLocaleString("en-IN")}
                                 {" | "}
-                                Total matching report entries: {filteredRecords.length}
+                                Total matching records: {
+                                    summaryCounts.total
+                                }
                             </p>
 
                             {selectedReport === "summary" ? (
@@ -1107,7 +1253,7 @@ export default function ReportsPage() {
 
                                     <tbody>
                                         {filteredRecords.map((record, index) => (
-                                            <tr key={record.id}>
+                                            <tr key={`${record.raw?._source}-${record.id}`}>
                                                 <td>{index + 1}</td>
                                                 <td>{record.productName}</td>
                                                 <td>{record.moduleLabel}</td>

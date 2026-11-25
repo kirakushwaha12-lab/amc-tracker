@@ -2,7 +2,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { useDashboardShell } from "./layout";
-
+import { useRouter } from "next/navigation";
 function toDate(value) {
     if (!value) return null;
 
@@ -38,18 +38,22 @@ function toDate(value) {
     return null;
 }
 
+
 function getModule(record) {
-    if (record._source === "compliance_records") {
+    const source = record._source;
+    const type = String(record.type || "").trim().toLowerCase();
+    const category = String(record.category || "").trim().toLowerCase();
+    const values = `${type} ${category}`;
+
+    if (source === "compliance_records") {
         return "Compliance";
     }
 
-    if (record._source === "machinery_records") {
+    if (source === "machinery_records") {
         return "Machinery";
     }
 
-    const values = `${record.type || ""} ${record.category || ""}`.toLowerCase();
-
-    if (record._source === "vehicles") {
+    if (source === "vehicles") {
         if (values.includes("pollution")) return "Pollution";
         if (values.includes("service")) return "Service";
         return "Insurance";
@@ -123,9 +127,60 @@ function getDaysRemaining(date) {
     );
 }
 
-function getProductName(record) {
+function getProductName(record, module) {
+    if (module === "Software License") {
+        return (
+            record.licenseName ||
+            record.softwareName ||
+            record.productName ||
+            record.name ||
+            "Unnamed License"
+        );
+    }
+
+    if (module === "Compliance") {
+        return (
+            record.examinationType ||
+            record.typeOfExamination ||
+            record.name ||
+            "Unnamed Compliance"
+        );
+    }
+
+    if (module === "Machinery") {
+        return (
+            record.machineName ||
+            record.machineNo ||
+            record.machineNumber ||
+            "Unnamed Machinery"
+        );
+    }
+
+    if (module === "Service") {
+        return record.vehicleName || record.vehicleNo || "Unnamed Vehicle";
+    }
+
+    if (module === "Pollution") {
+        return (
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productName ||
+            "Unnamed Vehicle"
+        );
+    }
+
+    if (module === "Insurance") {
+        return (
+            record.productName ||
+            record.vehicleNo ||
+            record.vehicleNumber ||
+            record.productId ||
+            record.policyNo ||
+            "Unnamed Insurance"
+        );
+    }
+
     return (
-        record.examinationType ||
         record.productName ||
         record.product ||
         record.item ||
@@ -138,17 +193,44 @@ function getProductName(record) {
     );
 }
 
-function getCompany(record) {
+
+function getCompany(record, module, eventType) {
+    if (module === "Machinery") {
+        return eventType === "AMC Expiry"
+            ? record.amcVendor || "—"
+            : record.serviceProvider || "—";
+    }
+
+    if (module === "Service") {
+        return record.serviceCentre || "—";
+    }
+
+    if (module === "Software License") {
+        return record.vendor || record.provider || "—";
+    }
+
+    if (module === "Pollution") {
+        return record.pucCentre || record.pucCenter || "—";
+    }
+
+    if (module === "Insurance") {
+        return (
+            record.company ||
+            record.companyVendor ||
+            record.vendor ||
+            record.insurerCompany ||
+            record.insuranceCompany ||
+            record.companyName ||
+            "—"
+        );
+    }
+
     return (
         record.companyVendor ||
         record.company ||
         record.vendor ||
         record.supplier ||
         record.serviceProvider ||
-        record.pucCentre ||
-        record.pucCenter ||
-        record.insurerCompany ||
-        record.insuranceCompany ||
         record.partnerCompany ||
         record.companyName ||
         "—"
@@ -156,6 +238,7 @@ function getCompany(record) {
 }
 
 // CREATE DASHBOARD EVENTS FOR NEW MODULES
+
 function createDashboardEvents(record) {
     const module = getModule(record);
 
@@ -168,34 +251,44 @@ function createDashboardEvents(record) {
             record.machineNumber ||
             "Unnamed Machinery";
 
-        const serviceDueDate =
-            record.nextDueDate ||
-            record.nextServiceDueDate;
+        const serviceExpiry = toDate(
+            record.nextDueDate || record.nextServiceDueDate
+        );
 
-        if (serviceDueDate) {
+        if (serviceExpiry) {
             events.push({
-                id: `${record.id}-service-due`,
+                id: `${record._source}-${record.id}-service-due`,
                 source: record._source,
                 productName: machineName,
-                companyName: record.serviceProvider || "—",
+                companyName: getCompany(
+                    record,
+                    module,
+                    "Service Due"
+                ),
                 module: "Machinery Service",
                 startDate: toDate(record.lastServiceDate),
-                expiryDate: toDate(serviceDueDate),
+                expiryDate: serviceExpiry,
             });
         }
 
-        if (
-            String(record.amcApplicable || "").trim().toLowerCase() === "yes" &&
-            record.amcEndDate
-        ) {
+        const isAmcApplicable =
+            String(record.amcApplicable || "").trim().toLowerCase() === "yes";
+
+        const amcExpiry = toDate(record.amcEndDate);
+
+        if (isAmcApplicable && amcExpiry) {
             events.push({
-                id: `${record.id}-amc-expiry`,
+                id: `${record._source}-${record.id}-amc-expiry`,
                 source: record._source,
                 productName: machineName,
-                companyName: record.amcVendor || "—",
+                companyName: getCompany(
+                    record,
+                    module,
+                    "AMC Expiry"
+                ),
                 module: "Machinery AMC",
                 startDate: toDate(record.amcStartDate),
-                expiryDate: toDate(record.amcEndDate),
+                expiryDate: amcExpiry,
             });
         }
 
@@ -205,28 +298,24 @@ function createDashboardEvents(record) {
     if (module === "Service") {
         return [
             {
-                id: `${record.id}-vehicle-service`,
+                id: `${record._source}-${record.id}-vehicle-service`,
                 source: record._source,
-                productName:
-                    record.vehicleNo ||
-                    record.vehicleNumber ||
-                    record.vehicleName ||
-                    "Unnamed Vehicle",
-                companyName: record.serviceCentre || "—",
-                module: "Service",
+                productName: getProductName(record, module),
+                companyName: getCompany(record, module),
+                module,
                 startDate: toDate(record.lastServiceDate),
                 expiryDate: toDate(record.nextServiceDueDate),
             },
         ];
     }
 
-    // Existing modules retain their original mapping.
+    // Existing modules use the same field mapping as Reports.
     return [
         {
-            id: record.id,
+            id: `${record._source}-${record.id}`,
             source: record._source,
-            productName: getProductName(record),
-            companyName: getCompany(record),
+            productName: getProductName(record, module),
+            companyName: getCompany(record, module),
             module,
             startDate: getStartDate(record),
             expiryDate: getExpiryDate(record),
@@ -269,9 +358,13 @@ function StatusBadge({ status }) {
     );
 }
 
-function SummaryCard({ title, value, description, icon, accent }) {
+function SummaryCard({ title, value, description, icon, accent, onClick }) {
     return (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <button
+            type="button"
+            onClick={onClick}
+            className="w-full rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
+        >
             <div className="flex items-start justify-between gap-3">
                 <div>
                     <p className="text-sm font-medium text-slate-500">
@@ -291,7 +384,7 @@ function SummaryCard({ title, value, description, icon, accent }) {
                     {icon}
                 </div>
             </div>
-        </div>
+        </button>
     );
 }
 
@@ -304,7 +397,7 @@ export default function Dashboard() {
     } = useDashboardShell();
 
     const expiringSoonDays = 10;
-
+    const router = useRouter();
     const [expiryTypeFilter, setExpiryTypeFilter] = useState("All");
     const [expirySearch, setExpirySearch] = useState("");
     const [todayKey, setTodayKey] = useState(
@@ -342,11 +435,10 @@ export default function Dashboard() {
     const summary = useMemo(() => ({
         // Count actual database records, not separate Machinery events.
         total: new Set(
-            allRecords.map(
-                (record) => `${record.source}-${record.recordId}`
+            records.map(
+                (record) => `${record._source}-${record.id}`
             )
         ).size,
-
         expiringSoon: allRecords.filter(
             (record) =>
                 record.daysRemaining !== null &&
@@ -365,7 +457,7 @@ export default function Dashboard() {
                 record.daysRemaining !== null &&
                 record.daysRemaining > expiringSoonDays
         ).length,
-    }), [allRecords]);
+    }), [records, allRecords]);
 
     const upcomingRecords = useMemo(() => {
         const globalQuery = search.trim().toLowerCase();
@@ -427,7 +519,7 @@ export default function Dashboard() {
             .sort((a, b) => a.daysRemaining - b.daysRemaining);
     }, [allRecords, search, expirySearch, expiryTypeFilter]);
 
-    const visibleUpcomingRecords = upcomingRecords.slice(0, 10);
+    const visibleUpcomingRecords = upcomingRecords;
 
     const clearExpiryFilters = () => {
         setExpiryTypeFilter("All");
@@ -461,6 +553,7 @@ export default function Dashboard() {
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                     <SummaryCard
                         title="Total Records"
+                        onClick={() => router.push("/dashboard/reports?report=summary")}
                         value={loadingData ? "—" : summary.total}
                         description="Across all tracked modules"
                         icon="▦"
@@ -469,6 +562,7 @@ export default function Dashboard() {
 
                     <SummaryCard
                         title="Expiring Soon"
+                        onClick={() => router.push("/dashboard/reports?report=expiring")}
                         value={loadingData ? "—" : summary.expiringSoon}
                         description="Expiry within the next 10 days"
                         icon="◷"
@@ -477,6 +571,7 @@ export default function Dashboard() {
 
                     <SummaryCard
                         title="Expired"
+                        onClick={() => router.push("/dashboard/reports?report=expired")}
                         value={loadingData ? "—" : summary.expired}
                         description="Records past their expiry date"
                         icon="!"
@@ -485,6 +580,7 @@ export default function Dashboard() {
 
                     <SummaryCard
                         title="Active"
+                        onClick={() => router.push("/dashboard/reports?report=active")}
                         value={loadingData ? "—" : summary.active}
                         description="More than 10 days remaining"
                         icon="✓"
@@ -628,7 +724,7 @@ export default function Dashboard() {
 
                     <div className="border-t border-slate-100 px-5 py-3">
                         <p className="text-xs text-slate-500">
-                            Showing up to 10 upcoming records. Use the search and module filters to narrow the results.
+                            Showing all matching upcoming records. Use the search and module filters to narrow the results.
                         </p>
                     </div>
                 </section>

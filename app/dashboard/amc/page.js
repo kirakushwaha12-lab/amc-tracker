@@ -1328,15 +1328,7 @@ export default function AMCPage() {
                                             </td>
                                             <td className="whitespace-nowrap px-4 py-4">
                                                 <div className="flex items-center gap-2">
-                                                    {record.documentData && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => openSavedDocument(record.documentData)}
-                                                            className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
-                                                        >
-                                                            View Doc
-                                                        </button>
-                                                    )}
+
                                                     {canEditRecords && (
                                                         <button
                                                             type="button"
@@ -1354,6 +1346,15 @@ export default function AMCPage() {
                                                             style={{ backgroundColor: BLUE }}
                                                         >
                                                             Renew
+                                                        </button>
+                                                    )}
+                                                    {record.documentData && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openSavedDocument(record.documentData)}
+                                                            className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                                                        >
+                                                            View Doc
                                                         </button>
                                                     )}
                                                     {isSuperAdmin && (

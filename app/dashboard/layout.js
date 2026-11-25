@@ -773,10 +773,11 @@ export default function DashboardLayout({ children }) {
             );
     }, [records, reminderDays, todayKey]);
 
-    const unreadNotificationCount = notifications.filter(
-        (item) =>
-            !readNotificationIds.includes(item.id)
-    ).length;
+    const unreadNotifications = notifications.filter(
+        (item) => !readNotificationIds.includes(item.id)
+    );
+
+    const unreadNotificationCount = unreadNotifications.length;
 
     // SAVE READ NOTIFICATION IDS
     const saveReadIds = useCallback(
@@ -988,57 +989,41 @@ export default function DashboardLayout({ children }) {
                                         </div>
 
                                         <div className="max-h-[360px] overflow-y-auto">
-                                            {notifications.length === 0 ? (
+                                            {unreadNotifications.length === 0 ? (
                                                 <p className="px-4 py-8 text-center text-sm text-slate-500">
                                                     No expiry or service alerts at the moment.
                                                 </p>
                                             ) : (
-                                                notifications.map((item) => {
-                                                    const isRead =
-                                                        readNotificationIds.includes(
-                                                            item.id
-                                                        );
-
-                                                    return (
-                                                        <button
-                                                            type="button"
-                                                            key={item.id}
-                                                            onClick={() =>
-                                                                markNotificationRead(
-                                                                    item.id
-                                                                )
-                                                            }
-                                                            className={`block w-full border-b border-slate-100 px-4 py-3 text-left transition hover:bg-slate-50 ${isRead
-                                                                ? "bg-white"
-                                                                : "bg-blue-50/70"
-                                                                }`}
-                                                        >
-                                                            <div className="flex items-start justify-between gap-3">
-                                                                <p className="text-sm font-semibold text-slate-800">
-                                                                    {item.title}
-                                                                </p>
-
-                                                                {!isRead && (
-                                                                    <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-blue-700" />
-                                                                )}
-                                                            </div>
-
-                                                            <p className="mt-1 text-sm text-slate-700">
-                                                                {item.productName}
+                                                unreadNotifications.map((item) => (
+                                                    <button
+                                                        type="button"
+                                                        key={item.id}
+                                                        onClick={() => markNotificationRead(item.id)}
+                                                        className="block w-full border-b border-slate-100 bg-blue-50/70 px-4 py-3 text-left transition hover:bg-slate-50"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <p className="text-sm font-semibold text-slate-800">
+                                                                {item.title}
                                                             </p>
 
-                                                            <p className="mt-1 text-xs text-slate-500">
-                                                                {item.module}
-                                                                {" · "}
-                                                                {item.daysRemaining < 0
-                                                                    ? `${Math.abs(item.daysRemaining)} day(s) overdue`
-                                                                    : item.daysRemaining === 0
-                                                                        ? "Due today"
-                                                                        : `${item.daysRemaining} day(s) remaining`}
-                                                            </p>
-                                                        </button>
-                                                    );
-                                                })
+                                                            <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-blue-700" />
+                                                        </div>
+
+                                                        <p className="mt-1 text-sm text-slate-700">
+                                                            {item.productName}
+                                                        </p>
+
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            {item.module}
+                                                            {" · "}
+                                                            {item.daysRemaining < 0
+                                                                ? `${Math.abs(item.daysRemaining)} day(s) overdue`
+                                                                : item.daysRemaining === 0
+                                                                    ? "Due today"
+                                                                    : `${item.daysRemaining} day(s) remaining`}
+                                                        </p>
+                                                    </button>
+                                                ))
                                             )}
                                         </div>
                                     </div>

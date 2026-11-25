@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -17,7 +18,6 @@ const SETTINGS_REF = doc(db, "app_settings", "expiryReminders");
 const DEFAULT_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
 
-// Keep these keys identical to MODULE_CONFIG in functions/send-expiry-reminders.js.
 const MODULES = [
     "AMC",
     "Warranty",
@@ -35,6 +35,7 @@ const EMAIL_TIME_OPTIONS = Array.from({ length: 65 }, (_, index) => {
     const totalMinutes = 360 + index * 15;
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
+
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 });
 
@@ -42,30 +43,111 @@ function formatTimeLabel(value) {
     const [hours, minutes] = value.split(":").map(Number);
     const suffix = hours >= 12 ? "PM" : "AM";
     const displayHour = hours % 12 || 12;
+
     return `${String(displayHour).padStart(2, "0")}:${String(minutes).padStart(2, "0")} ${suffix}`;
 }
 
 function normalizeRole(value) {
-    return String(value || "").trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[_-]/g, " ")
+        .replace(/\s+/g, " ");
 }
 
 function isSuperAdminUser(profile) {
     const role = normalizeRole(profile?.role);
-    return profile?.active === true && ["super admin", "superadmin"].includes(role);
+
+    return (
+        profile?.active === true &&
+        ["super admin", "superadmin"].includes(role)
+    );
 }
 
 function cleanReminderDays(value) {
     if (!Array.isArray(value)) return DEFAULT_DAYS;
-    const numbers = value.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 365);
+
+    const numbers = value
+        .map(Number)
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 365);
+
     return [...new Set([...numbers, 0])].sort((a, b) => b - a);
 }
 
 function cleanEmailTime(value) {
-    return EMAIL_TIME_OPTIONS.includes(value) ? value : DEFAULT_EMAIL_TIME;
+    return EMAIL_TIME_OPTIONS.includes(value)
+        ? value
+        : DEFAULT_EMAIL_TIME;
 }
 
-function createEmptyOperators() {
-    return Object.fromEntries(MODULES.map((moduleName) => [moduleName, []]));
+function createEmptySchedules() {
+    return Object.fromEntries(
+        MODULES.map((moduleName) => [moduleName, []])
+    );
+}
+
+function normalizeScheduleEntries(entries, validUids) {
+    if (!Array.isArray(entries)) return [];
+
+    const cleaned = entries
+        .map((entry) => {
+            const daysBefore = Number(entry?.daysBefore);
+
+            if (
+                !Number.isInteger(daysBefore) ||
+                daysBefore < 0 ||
+                daysBefore > 365
+            ) {
+                return null;
+            }
+
+            const recipients = Array.isArray(entry?.recipients)
+                ? [...new Set(entry.recipients.map(String))]
+                    .filter((uid) => validUids.has(uid))
+                : [];
+
+            return {
+                daysBefore,
+                recipients,
+            };
+        })
+        .filter(Boolean);
+
+    const uniqueDays = new Map();
+
+    for (const entry of cleaned) {
+        uniqueDays.set(entry.daysBefore, entry);
+    }
+
+    return [...uniqueDays.values()].sort(
+        (a, b) => b.daysBefore - a.daysBefore
+    );
+}
+
+function createLegacySchedules(settings, validUids) {
+    const schedules = createEmptySchedules();
+
+    const legacyDays = cleanReminderDays(settings.reminderDays);
+
+    const legacyOperators =
+        settings.moduleOperators &&
+        typeof settings.moduleOperators === "object"
+            ? settings.moduleOperators
+            : {};
+
+    for (const moduleName of MODULES) {
+        const oldRecipients = Array.isArray(legacyOperators[moduleName])
+            ? [...new Set(legacyOperators[moduleName].map(String))]
+                .filter((uid) => validUids.has(uid))
+            : [];
+
+        schedules[moduleName] = legacyDays.map((daysBefore) => ({
+            daysBefore,
+            recipients: [...oldRecipients],
+        }));
+    }
+
+    return schedules;
 }
 
 export default function ReminderSettingsPage() {
@@ -75,11 +157,18 @@ export default function ReminderSettingsPage() {
     const [saving, setSaving] = useState(false);
     const [allowed, setAllowed] = useState(false);
 
-    const [daysText, setDaysText] = useState("10, 3, 1, 0");
     const [emailTime, setEmailTime] = useState(DEFAULT_EMAIL_TIME);
     const [users, setUsers] = useState([]);
-    const [moduleOperators, setModuleOperators] = useState(createEmptyOperators());
+
+    const [moduleSchedules, setModuleSchedules] = useState(
+        createEmptySchedules()
+    );
+
+    const [selectedModule, setSelectedModule] = useState("AMC");
+    const [newReminderDay, setNewReminderDay] = useState("");
+
     const [error, setError] = useState("");
+    const [success, setSuccess] = useState("");
 
     useEffect(() => {
         let cancelled = false;
@@ -87,6 +176,7 @@ export default function ReminderSettingsPage() {
         const unsubscribe = onAuthStateChanged(auth, async (user) => {
             setAllowed(false);
             setError("");
+            setSuccess("");
 
             if (!user) {
                 router.replace("/");
@@ -96,16 +186,24 @@ export default function ReminderSettingsPage() {
             setLoading(true);
 
             try {
-                const profileSnapshot = await getDoc(doc(db, "users", user.uid));
+                const profileSnapshot = await getDoc(
+                    doc(db, "users", user.uid)
+                );
+
                 if (cancelled) return;
 
-                const profile = profileSnapshot.exists() ? profileSnapshot.data() : {};
+                const profile = profileSnapshot.exists()
+                    ? profileSnapshot.data()
+                    : {};
+
                 const permitted = isSuperAdminUser(profile);
 
                 setAllowed(permitted);
 
                 if (!permitted) {
-                    setError("Only an active Super Admin can change expiry reminder settings.");
+                    setError(
+                        "Only an active Super Admin can change expiry reminder settings."
+                    );
                     setLoading(false);
                     return;
                 }
@@ -117,49 +215,77 @@ export default function ReminderSettingsPage() {
 
                 if (cancelled) return;
 
-                const settings = settingsSnapshot.exists() ? settingsSnapshot.data() : {};
+                const settings = settingsSnapshot.exists()
+                    ? settingsSnapshot.data()
+                    : {};
 
-                const activeEditors = usersSnapshot.docs
+                // All active users with valid email addresses can be selected.
+                const activeUsers = usersSnapshot.docs
                     .map((item) => {
                         const data = item.data();
 
                         return {
                             uid: item.id,
-                            name: String(data.name || data.displayName || data.email || "User").trim(),
-                            email: String(data.email || "").trim().toLowerCase(),
+                            name: String(
+                                data.name ||
+                                data.displayName ||
+                                data.email ||
+                                "User"
+                            ).trim(),
+                            email: String(data.email || "")
+                                .trim()
+                                .toLowerCase(),
                             role: String(data.role || "Viewer"),
                             active: data.active === true,
                         };
                     })
-                    .filter((item) => item.active && normalizeRole(item.role) === "editor" && EMAIL_RE.test(item.email))
+                    .filter(
+                        (item) =>
+                            item.active &&
+                            EMAIL_RE.test(item.email)
+                    )
                     .sort((a, b) => a.name.localeCompare(b.name));
 
-                const validEditorUids = new Set(activeEditors.map((item) => item.uid));
+                const validUids = new Set(
+                    activeUsers.map((item) => item.uid)
+                );
 
-                const savedOperators = settings.moduleOperators && typeof settings.moduleOperators === "object"
-                    ? settings.moduleOperators
-                    : {};
+                let loadedSchedules;
 
-                const normalizedOperators = createEmptyOperators();
+                // Prefer the new module-wise schedule configuration.
+                if (
+                    settings.moduleSchedules &&
+                    typeof settings.moduleSchedules === "object"
+                ) {
+                    loadedSchedules = createEmptySchedules();
 
-                for (const moduleName of MODULES) {
-                    const saved = Array.isArray(savedOperators[moduleName])
-                        ? savedOperators[moduleName].map(String)
-                        : [];
-
-                    normalizedOperators[moduleName] = [...new Set(saved)].filter((uid) => validEditorUids.has(uid));
+                    for (const moduleName of MODULES) {
+                        loadedSchedules[moduleName] =
+                            normalizeScheduleEntries(
+                                settings.moduleSchedules[moduleName],
+                                validUids
+                            );
+                    }
+                } else {
+                    // Migrate old global reminderDays/moduleOperators
+                    // into the new page's initial schedule.
+                    loadedSchedules = createLegacySchedules(
+                        settings,
+                        validUids
+                    );
                 }
 
-                setUsers(activeEditors);
-                setModuleOperators(normalizedOperators);
-                setDaysText(cleanReminderDays(settings.reminderDays).join(", "));
+                setUsers(activeUsers);
+                setModuleSchedules(loadedSchedules);
                 setEmailTime(cleanEmailTime(settings.emailTime));
                 setLoading(false);
             } catch (err) {
                 console.error("Reminder settings load error:", err);
 
                 if (!cancelled) {
-                    setError("Settings or users could not be loaded. Check Firestore permissions.");
+                    setError(
+                        "Settings or users could not be loaded. Check Firestore permissions."
+                    );
                     setLoading(false);
                 }
             }
@@ -171,63 +297,150 @@ export default function ReminderSettingsPage() {
         };
     }, [router]);
 
-    const selectedCount = useMemo(
-        () => MODULES.reduce((total, moduleName) => total + (moduleOperators[moduleName]?.length || 0), 0),
-        [moduleOperators]
-    );
+    const currentSchedule = moduleSchedules[selectedModule] || [];
 
-    function toggleOperator(moduleName, uid, checked) {
-        setModuleOperators((current) => {
-            const selected = new Set(current[moduleName] || []);
+    const totalAssignments = useMemo(() => {
+        return MODULES.reduce((total, moduleName) => {
+            const entries = moduleSchedules[moduleName] || [];
 
-            if (checked) selected.add(uid);
-            else selected.delete(uid);
+            return (
+                total +
+                entries.reduce(
+                    (count, entry) =>
+                        count + (entry.recipients?.length || 0),
+                    0
+                )
+            );
+        }, 0);
+    }, [moduleSchedules]);
 
-            return { ...current, [moduleName]: [...selected] };
+    function addReminderDay() {
+        setError("");
+        setSuccess("");
+
+        const value = newReminderDay.trim();
+
+        if (value === "") {
+            setError("Enter reminder days before adding.");
+            return;
+        }
+
+        const day = Number(value);
+
+        if (
+            !Number.isInteger(day) ||
+            day < 0 ||
+            day > 365
+        ) {
+            setError("Reminder days must be a whole number between 0 and 365.");
+            return;
+        }
+
+        if (currentSchedule.some((item) => item.daysBefore === day)) {
+            setError(`A ${day}-day reminder already exists for ${selectedModule}.`);
+            return;
+        }
+
+        setModuleSchedules((current) => {
+            const existing = current[selectedModule] || [];
+
+            return {
+                ...current,
+                [selectedModule]: [
+                    ...existing,
+                    {
+                        daysBefore: day,
+                        recipients: [],
+                    },
+                ].sort((a, b) => b.daysBefore - a.daysBefore),
+            };
+        });
+
+        setNewReminderDay("");
+    }
+
+    function removeReminderDay(moduleName, daysBefore) {
+        setModuleSchedules((current) => ({
+            ...current,
+            [moduleName]: (current[moduleName] || []).filter(
+                (item) => item.daysBefore !== daysBefore
+            ),
+        }));
+    }
+
+    function toggleRecipient(moduleName, daysBefore, uid, checked) {
+        setModuleSchedules((current) => {
+            const existing = current[moduleName] || [];
+
+            return {
+                ...current,
+                [moduleName]: existing.map((entry) => {
+                    if (entry.daysBefore !== daysBefore) {
+                        return entry;
+                    }
+
+                    const selected = new Set(entry.recipients || []);
+
+                    if (checked) {
+                        selected.add(uid);
+                    } else {
+                        selected.delete(uid);
+                    }
+
+                    return {
+                        ...entry,
+                        recipients: [...selected],
+                    };
+                }),
+            };
         });
     }
 
     async function handleSave(event) {
         event.preventDefault();
+
         setError("");
-
-        const rawDays = daysText.split(/[,\s]+/).filter(Boolean);
-        const parsedDays = rawDays.map(Number);
-
-        if (!parsedDays.length || parsedDays.some((day) => !Number.isInteger(day) || day < 0 || day > 365)) {
-            setError("Enter valid whole numbers from 0 to 365, separated by commas.");
-            return;
-        }
+        setSuccess("");
 
         if (!EMAIL_TIME_OPTIONS.includes(emailTime)) {
             setError("Please select a valid email sending time.");
             return;
         }
 
-        const reminderDays = cleanReminderDays(parsedDays);
         const validUids = new Set(users.map((user) => user.uid));
-        const safeOperators = createEmptyOperators();
+        const safeSchedules = createEmptySchedules();
 
         for (const moduleName of MODULES) {
-            safeOperators[moduleName] = [...new Set(moduleOperators[moduleName] || [])].filter((uid) => validUids.has(uid));
+            safeSchedules[moduleName] = normalizeScheduleEntries(
+                moduleSchedules[moduleName],
+                validUids
+            );
         }
 
         try {
             setSaving(true);
 
-            await setDoc(SETTINGS_REF, {
-                reminderDays,
-                emailTime,
-                timeZone: "Asia/Kolkata",
-                moduleOperators: safeOperators,
-                updatedAt: serverTimestamp(),
-                updatedBy: auth.currentUser?.uid || "",
-            }, { merge: true });
+            await setDoc(
+                SETTINGS_REF,
+                {
+                    moduleSchedules: safeSchedules,
+                    emailTime,
+                    timeZone: "Asia/Kolkata",
+                    updatedAt: serverTimestamp(),
+                    updatedBy: auth.currentUser?.uid || "",
+                },
+                { merge: true }
+            );
 
-            router.replace("/dashboard/users");
+            setModuleSchedules(safeSchedules);
+            setSuccess("Reminder settings saved successfully.");
         } catch (err) {
             console.error("Reminder settings save error:", err);
-            setError("Could not save settings. Check Firestore permissions.");
+
+            setError(
+                "Could not save settings. Check Firestore permissions."
+            );
+        } finally {
             setSaving(false);
         }
     }
@@ -253,27 +466,197 @@ export default function ReminderSettingsPage() {
                             {error}
                         </p>
                     ) : (
-                        <form onSubmit={handleSave} className="mt-6 space-y-7">
+                        <form
+                            onSubmit={handleSave}
+                            className="mt-6 space-y-7"
+                        >
+                            {/* Module selection */}
                             <div>
                                 <h2 className="text-base font-bold text-slate-900">
-                                    Reminder Schedule
+                                    Select Module
                                 </h2>
 
-                                <label className="mt-3 block text-sm font-semibold text-slate-700">
-                                    Days before expiry
-                                    <input
-                                        value={daysText}
-                                        onChange={(event) => setDaysText(event.target.value)}
-                                        placeholder="15, 7, 3, 1, 0"
-                                        className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-3 text-base font-normal outline-none focus:border-blue-500"
-                                    />
-                                </label>
-
-                                <p className="mt-2 text-xs text-slate-500">
-                                    0 means the expiry / due date itself. Overdue records are included automatically.
-                                </p>
+                                <select
+                                    value={selectedModule}
+                                    onChange={(event) => {
+                                        setSelectedModule(event.target.value);
+                                        setNewReminderDay("");
+                                        setError("");
+                                        setSuccess("");
+                                    }}
+                                    className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base outline-none focus:border-blue-600"
+                                >
+                                    {MODULES.map((moduleName) => (
+                                        <option
+                                            key={moduleName}
+                                            value={moduleName}
+                                        >
+                                            {moduleName}
+                                        </option>
+                                    ))}
+                                </select>
                             </div>
 
+                            {/* Reminder schedule */}
+                            <div className="rounded-xl border border-slate-200 p-4">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                        <h2 className="text-base font-bold text-slate-900">
+                                            {selectedModule} Reminder Schedule
+                                        </h2>
+
+                                        <p className="mt-1 text-sm text-slate-600">
+                                            Set reminder days and select
+                                            recipients for each reminder.
+                                        </p>
+                                    </div>
+
+                                    <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">
+                                        {currentSchedule.length} reminder(s)
+                                    </span>
+                                </div>
+
+                                {/* Add reminder day */}
+                                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        max="365"
+                                        step="1"
+                                        value={newReminderDay}
+                                        onChange={(event) =>
+                                            setNewReminderDay(event.target.value)
+                                        }
+                                        placeholder="Days before expiry (e.g. 15)"
+                                        className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-3 outline-none focus:border-blue-600"
+                                    />
+
+                                    <button
+                                        type="button"
+                                        onClick={addReminderDay}
+                                        className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
+                                    >
+                                        + Add Reminder
+                                    </button>
+                                </div>
+
+                                <p className="mt-2 text-xs text-slate-500">
+                                    0 = expiry date itself. You can add
+                                    reminders from 0 to 365 days before expiry.
+                                </p>
+
+                                {/* Schedule entries */}
+                                {currentSchedule.length === 0 ? (
+                                    <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
+                                        No reminder days configured for this
+                                        module. Add a reminder day above.
+                                    </div>
+                                ) : (
+                                    <div className="mt-5 space-y-4">
+                                        {currentSchedule.map((entry) => (
+                                            <div
+                                                key={entry.daysBefore}
+                                                className="rounded-xl border border-slate-200 p-4"
+                                            >
+                                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                                    <div>
+                                                        <h3 className="font-bold text-slate-900">
+                                                            {entry.daysBefore === 0
+                                                                ? "Expiry Day (0)"
+                                                                : `${entry.daysBefore} Days Before`}
+                                                        </h3>
+
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            {entry.recipients?.length || 0} user(s) selected
+                                                        </p>
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            removeReminderDay(
+                                                                selectedModule,
+                                                                entry.daysBefore
+                                                            )
+                                                        }
+                                                        className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                                                    >
+                                                        Remove Day
+                                                    </button>
+                                                </div>
+
+                                                {users.length === 0 ? (
+                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                                                        No active users with
+                                                        valid email addresses
+                                                        available.
+                                                    </p>
+                                                ) : (
+                                                    <div className="mt-4">
+                                                        <p className="mb-2 text-sm font-semibold text-slate-700">
+                                                            Select Recipients
+                                                        </p>
+
+                                                        <div className="grid gap-2 sm:grid-cols-2">
+                                                            {users.map((user) => (
+                                                                <label
+                                                                    key={user.uid}
+                                                                    className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-100 px-3 py-3 hover:bg-slate-50"
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={
+                                                                            (
+                                                                                entry.recipients ||
+                                                                                []
+                                                                            ).includes(
+                                                                                user.uid
+                                                                            )
+                                                                        }
+                                                                        onChange={(event) =>
+                                                                            toggleRecipient(
+                                                                                selectedModule,
+                                                                                entry.daysBefore,
+                                                                                user.uid,
+                                                                                event.target.checked
+                                                                            )
+                                                                        }
+                                                                        className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                                                                    />
+
+                                                                    <span className="min-w-0">
+                                                                        <span className="block text-sm font-medium text-slate-800">
+                                                                            {user.name}
+                                                                        </span>
+
+                                                                        <span className="block break-all text-xs text-slate-500">
+                                                                            {user.email}
+                                                                        </span>
+
+                                                                        <span className="mt-1 inline-block rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                                                                            {user.role}
+                                                                        </span>
+                                                                    </span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {(!entry.recipients ||
+                                                    entry.recipients.length === 0) && (
+                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                                                        No recipients selected
+                                                        for this reminder day.
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Email time */}
                             <div className="rounded-xl border border-slate-200 p-4">
                                 <h2 className="text-base font-bold text-slate-900">
                                     Email Delivery Time
@@ -283,11 +666,16 @@ export default function ReminderSettingsPage() {
                                     Send reminder emails at
                                     <select
                                         value={emailTime}
-                                        onChange={(event) => setEmailTime(event.target.value)}
-                                        className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base font-normal outline-none focus:border-blue-500"
+                                        onChange={(event) =>
+                                            setEmailTime(event.target.value)
+                                        }
+                                        className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base font-normal outline-none focus:border-blue-600"
                                     >
                                         {EMAIL_TIME_OPTIONS.map((time) => (
-                                            <option key={time} value={time}>
+                                            <option
+                                                key={time}
+                                                value={time}
+                                            >
                                                 {formatTimeLabel(time)}
                                             </option>
                                         ))}
@@ -295,93 +683,63 @@ export default function ReminderSettingsPage() {
                                 </label>
 
                                 <div className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
-                                    <strong>Time Zone:</strong> India Standard Time (Asia/Kolkata)
+                                    <strong>Time Zone:</strong> India Standard
+                                    Time (Asia/Kolkata)
                                     <br />
-                                    <strong>Selected Time:</strong> {formatTimeLabel(emailTime)} IST
+                                    <strong>Selected Time:</strong>{" "}
+                                    {formatTimeLabel(emailTime)} IST
                                 </div>
                             </div>
 
-                            <div>
-                                <div className="flex flex-wrap items-end justify-between gap-2">
-                                    <h2 className="text-base font-bold text-slate-900">
-                                        Submodule Operators
-                                    </h2>
+                            {/* Summary */}
+                            <div className="rounded-xl border border-slate-200 p-4">
+                                <h2 className="text-base font-bold text-slate-900">
+                                    Configuration Summary
+                                </h2>
 
-                                    <span className="text-xs text-slate-500">
-                                        {selectedCount} assignment(s)
-                                    </span>
-                                </div>
-
-                                <p className="mt-2 text-sm text-slate-600">
-                                    Assign active Editors to the modules they handle. Each assigned Editor receives email reminders only for their assigned modules.
-                                </p>
-
-                                {users.length === 0 ? (
-                                    <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                        No active Editors with valid email addresses found.
-                                    </p>
-                                ) : (
-                                    <div className="mt-4 grid gap-4 md:grid-cols-2">
-                                        {MODULES.map((moduleName) => (
-                                            <section
-                                                key={moduleName}
-                                                className="rounded-xl border border-slate-200 p-4"
-                                            >
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <h3 className="font-bold text-slate-900">
-                                                        {moduleName}
-                                                    </h3>
-
-                                                    <span className="text-xs text-slate-500">
-                                                        {moduleOperators[moduleName]?.length || 0} selected
-                                                    </span>
-                                                </div>
-
-                                                <div className="mt-3 max-h-52 space-y-2 overflow-y-auto">
-                                                    {users.map((user) => (
-                                                        <label
-                                                            key={user.uid}
-                                                            className="flex cursor-pointer items-start gap-3 rounded-lg px-2 py-2 hover:bg-slate-50"
-                                                        >
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={(moduleOperators[moduleName] || []).includes(user.uid)}
-                                                                onChange={(event) =>
-                                                                    toggleOperator(moduleName, user.uid, event.target.checked)
-                                                                }
-                                                                className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                                                            />
-
-                                                            <span className="min-w-0">
-                                                                <span className="block text-sm font-medium text-slate-800">
-                                                                    {user.name}
-                                                                </span>
-
-                                                                <span className="block break-all text-xs text-slate-500">
-                                                                    {user.email} · {user.role}
-                                                                </span>
-                                                            </span>
-                                                        </label>
-                                                    ))}
-                                                </div>
-                                            </section>
-                                        ))}
+                                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                    <div className="rounded-lg bg-slate-50 p-3">
+                                        <p className="text-xs text-slate-500">
+                                            Modules
+                                        </p>
+                                        <p className="mt-1 text-xl font-bold text-slate-900">
+                                            {MODULES.length}
+                                        </p>
                                     </div>
-                                )}
+
+                                    <div className="rounded-lg bg-slate-50 p-3">
+                                        <p className="text-xs text-slate-500">
+                                            Active Users Available
+                                        </p>
+                                        <p className="mt-1 text-xl font-bold text-slate-900">
+                                            {users.length}
+                                        </p>
+                                    </div>
+
+                                    <div className="col-span-2 rounded-lg bg-slate-50 p-3 sm:col-span-1">
+                                        <p className="text-xs text-slate-500">
+                                            User Assignments
+                                        </p>
+                                        <p className="mt-1 text-xl font-bold text-slate-900">
+                                            {totalAssignments}
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
 
-                            <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">
-                                <p>
-                                    <strong>Super Admin:</strong> expiry day and overdue emails only, for all modules.
+                            {/* Current stage warning */}
+                            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                                <p className="font-bold">
+                                    Configuration Only
                                 </p>
+
                                 <p className="mt-1">
-                                    <strong>Admin:</strong> all configured reminder days and overdue emails, for all modules.
-                                </p>
-                                <p className="mt-1">
-                                    <strong>Editor:</strong> all configured reminder days and overdue emails, only for assigned modules.
-                                </p>
-                                <p className="mt-1">
-                                    <strong>Viewer:</strong> no email reminders.
+                                    These settings will be saved in Firestore.
+                                    The email reminder function is not being
+                                    changed in this stage, so the new
+                                    module-wise recipient configuration will
+                                    not affect email delivery until routing
+                                    implementation is done separately.
                                 </p>
                             </div>
 
@@ -391,10 +749,19 @@ export default function ReminderSettingsPage() {
                                 </p>
                             )}
 
+                            {success && (
+                                <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
+                                    {success}
+                                </p>
+                            )}
+
+                            {/* Actions */}
                             <div className="flex flex-wrap gap-3">
                                 <button
                                     type="button"
-                                    onClick={() => router.push("/dashboard/users")}
+                                    onClick={() =>
+                                        router.push("/dashboard/users")
+                                    }
                                     disabled={saving}
                                     className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                                 >
@@ -404,9 +771,11 @@ export default function ReminderSettingsPage() {
                                 <button
                                     type="submit"
                                     disabled={saving}
-                                    className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+                                    className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
                                 >
-                                    {saving ? "Saving…" : "Save Reminder Settings"}
+                                    {saving
+                                        ? "Saving…"
+                                        : "Save Reminder Settings"}
                                 </button>
                             </div>
                         </form>
