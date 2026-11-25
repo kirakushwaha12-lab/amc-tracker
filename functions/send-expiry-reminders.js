@@ -36,6 +36,8 @@ const APP_URL = String(process.env.APP_URL || "").trim();
 const TIME_ZONE = "Asia/Kolkata";
 const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
+// Alternate-day email schedule
+const ALTERNATE_DAY_START_DATE = "2026-11-25";
 
 const MODULE_CONFIG = [
     {
@@ -1144,7 +1146,32 @@ async function main() {
 
         return;
     }
+    // -------------------- ALTERNATE-DAY CHECK --------------------
 
+    const daysSinceStart = daysBetween(
+        ALTERNATE_DAY_START_DATE,
+        today
+    );
+
+    if (daysSinceStart < 0) {
+        console.log(
+            `Alternate-day schedule has not started yet. Start date: ${ALTERNATE_DAY_START_DATE}.`
+        );
+
+        return;
+    }
+
+    if (daysSinceStart % 2 !== 0) {
+        console.log(
+            `Alternate-day schedule: today (${today}) is a SKIP day. No emails will be sent.`
+        );
+
+        return;
+    }
+
+    console.log(
+        `Alternate-day schedule: today (${today}) is a SEND day.`
+    );
     console.log(
         "Configured email time reached. Checking expiry records..."
     );
