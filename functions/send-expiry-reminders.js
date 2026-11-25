@@ -670,21 +670,17 @@ function buildEmailHtml(records, today, isTest) {
 
     const appButton = appLinkIsValid
         ? `
-            <div style="margin:28px 0;">
-                <a href="${escapeHtml(APP_URL)}"
-                   style="
-                       display:inline-block;
-                       background:#0b4da2;
-                       color:#ffffff;
-                       text-decoration:none;
-                       padding:12px 24px;
-                       border-radius:5px;
-                       font-weight:bold;
-                       font-size:14px;
-                   ">
-                    Open AIL Tracker
-                </a>
-            </div>
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0;">
+                <tr>
+                    <td bgcolor="#0b4da2" style="background-color:#0b4da2;border-radius:5px;text-align:center;">
+                        <a href="${escapeHtml(APP_URL)}"
+                           target="_blank"
+                           style="display:inline-block;padding:12px 24px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:5px;">
+                            Open AIL Tracker
+                        </a>
+                    </td>
+                </tr>
+            </table>
         `
         : `
             <p style="margin:24px 0;color:#6b7280;font-size:13px;">
