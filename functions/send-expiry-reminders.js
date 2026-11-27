@@ -295,9 +295,29 @@ function getEmailTime(settings) {
         settings?.emailTime || DEFAULT_EMAIL_TIME
     ).trim();
 
-    return /^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)
-        ? value
-        : DEFAULT_EMAIL_TIME;
+    const match = value.match(
+        /^([01]\d|2[0-3]):([0-5]\d)$/
+    );
+
+    if (!match) return DEFAULT_EMAIL_TIME;
+
+    const [hours, minutes] = value.split(":").map(Number);
+    const totalMinutes = hours * 60 + minutes;
+
+    // Match Reminder Settings UI: 06:00 AM to 10:00 PM
+    // at 15-minute intervals.
+    const minimum = 6 * 60;
+    const maximum = 22 * 60;
+
+    if (
+        totalMinutes < minimum ||
+        totalMinutes > maximum ||
+        minutes % 15 !== 0
+    ) {
+        return DEFAULT_EMAIL_TIME;
+    }
+
+    return value;
 }
 
 function getCurrentTimeInIndia() {
@@ -691,10 +711,75 @@ function buildEmailHtml(records, today, isTest) {
         `
         : `
             <p style="margin:24px 0;color:#6b7280;font-size:13px;">
-                Please open the Company Records &amp; Expiry Tracker
-                to review the records.
+                Please open the Company Records &amp; Expiry Tracker to review the records.
             </p>
         `;
+
+    const testBanner = isTest
+        ? `
+            <div style="
+                background:#fff7ed;
+                border:1px solid #fed7aa;
+                padding:10px 12px;
+                margin:14px 0;
+                font-size:13px;
+                color:#9a3412;
+                line-height:1.6;
+            ">
+                <strong>TEST EMAIL -</strong>
+                This email was sent only to the configured test email address.
+                No actual reminder routing was used.
+            </div>
+        `
+        : "";
+
+    const introText = records.length
+        ? "This is a reminder to review the following records that are approaching their expiry or due date:"
+        : isTest
+            ? "This is a test email to verify the automated email notification system. No actual expiry reminder is being sent."
+            : "No configured expiry reminders are due today.";
+
+    const recordsTable = records.length
+        ? `
+            <table style="
+                width:100%;
+                border-collapse:collapse;
+                font-size:13px;
+            ">
+                <thead>
+                    <tr style="
+                        background:#f1f5f9;
+                        color:#1f2937;
+                        text-align:left;
+                    ">
+                        <th style="padding:11px;border:1px solid #e5e7eb;">
+                            Module
+                        </th>
+                        <th style="padding:11px;border:1px solid #e5e7eb;">
+                            Record
+                        </th>
+                        <th style="padding:11px;border:1px solid #e5e7eb;">
+                            Expiry / Due Date
+                        </th>
+                        <th style="padding:11px;border:1px solid #e5e7eb;">
+                            Reminder
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+
+            <p style="
+                font-size:14px;
+                line-height:1.7;
+                margin:22px 0 0;
+            ">
+                Please review the above records and take the necessary action as required.
+            </p>
+        `
+        : "";
 
     return `
         <div style="
@@ -731,26 +816,18 @@ function buildEmailHtml(records, today, isTest) {
                         margin:22px 0 8px;
                         color:#1f2937;
                     ">
-                        Expiry &amp; Renewal Reminder
+                        Company Records &amp; Expiry Tracker
                     </h2>
 
-                    ${isTest
-            ? `
-                                <div style="
-                                    background:#fff7ed;
-                                    border:1px solid #fed7aa;
-                                    padding:10px 12px;
-                                    margin:14px 0;
-                                    font-size:13px;
-                                    color:#9a3412;
-                                ">
-                                    <strong>TEST EMAIL</strong> ΓÇö This email
-                                    was sent only to the configured test email
-                                    address. No actual reminder routing was used.
-                                </div>
-                            `
-            : ""
-        }
+                    <p style="
+                        font-size:14px;
+                        color:#64748b;
+                        margin:0 0 12px;
+                    ">
+                        Company Records &amp; Expiry Tracker
+                    </p>
+
+                    ${testBanner}
 
                     <p style="font-size:14px;margin:22px 0 12px;">
                         Dear User,
@@ -761,10 +838,7 @@ function buildEmailHtml(records, today, isTest) {
                         line-height:1.7;
                         margin:0 0 18px;
                     ">
-                        ${records.length
-            ? "This is a reminder to review the following records that are approaching their expiry or due date:"
-            : "This is a test email to verify the email reminder system. No configured reminders are due today."
-        }
+                        ${introText}
                     </p>
 
                     <div style="
@@ -775,49 +849,7 @@ function buildEmailHtml(records, today, isTest) {
                         Date: ${escapeHtml(displayDate(today))}
                     </div>
 
-                    ${records.length
-            ? `
-                                <table style="
-                                    width:100%;
-                                    border-collapse:collapse;
-                                    font-size:13px;
-                                ">
-                                    <thead>
-                                        <tr style="
-                                            background:#f1f5f9;
-                                            color:#1f2937;
-                                            text-align:left;
-                                        ">
-                                            <th style="padding:11px;border:1px solid #e5e7eb;">
-                                                Module
-                                            </th>
-                                            <th style="padding:11px;border:1px solid #e5e7eb;">
-                                                Record
-                                            </th>
-                                            <th style="padding:11px;border:1px solid #e5e7eb;">
-                                                Expiry / Due Date
-                                            </th>
-                                            <th style="padding:11px;border:1px solid #e5e7eb;">
-                                                Reminder
-                                            </th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        ${rows}
-                                    </tbody>
-                                </table>
-
-                                <p style="
-                                    font-size:14px;
-                                    line-height:1.7;
-                                    margin:22px 0 0;
-                                ">
-                                    Please review the above records and take
-                                    the necessary action as required.
-                                </p>
-                            `
-            : ""
-        }
+                    ${recordsTable}
 
                     ${appButton}
 
@@ -943,9 +975,8 @@ async function sendOneEmail(email, records, today, isTest) {
     }
 
     const subject = isTest
-        ? `TEST ΓÇö Expiry Reminder (${today})`
-        : `Expiry Reminder: ${records.length} record(s) require attention`;
-
+        ? `TEST - Company Records & Expiry Tracker (${today})`
+        : `Company Records & Expiry Tracker - ${records.length} record(s) require attention`;
     let resendResult;
 
     try {
