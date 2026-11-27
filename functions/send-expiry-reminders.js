@@ -1,61 +1,243 @@
-"use client";
+﻿const admin = require("firebase-admin");
+const { Resend } = require("resend");
+const crypto = require("node:crypto");
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { onAuthStateChanged } from "firebase/auth";
-import {
-    collection,
-    doc,
-    getDoc,
-    getDocs,
-    serverTimestamp,
-    setDoc,
-} from "firebase/firestore";
-import { auth, db } from "../../../lib/firebase";
+const serviceAccount = JSON.parse(
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}"
+);
 
-const SETTINGS_REF = doc(db, "app_settings", "expiryReminders");
-const DEFAULT_DAYS = [10, 3, 1, 0];
+if (!serviceAccount.project_id) {
+    throw new Error("Missing Firebase service account configuration.");
+}
+
+if (!process.env.RESEND_API_KEY) {
+    throw new Error("Missing RESEND_API_KEY.");
+}
+
+if (!process.env.EMAIL_FROM) {
+    throw new Error("Missing EMAIL_FROM.");
+}
+
+const TEST_MODE =
+    String(process.env.TEST_MODE || "true").toLowerCase() !== "false";
+
+const TEST_EMAIL = String(process.env.TEST_EMAIL || "")
+    .trim()
+    .toLowerCase();
+
+const FORCE_TEST_EMAIL =
+    String(process.env.FORCE_TEST_EMAIL || "false").toLowerCase() === "true";
+
+const ROUTING_DRY_RUN =
+    String(process.env.ROUTING_DRY_RUN || "false").toLowerCase() === "true";
+
+const EMAIL_FROM = process.env.EMAIL_FROM;
+const APP_URL = String(process.env.APP_URL || "").trim();
+const TIME_ZONE = "Asia/Kolkata";
+const DEFAULT_REMINDER_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
-const DEFAULT_REGULAR_FREQUENCY = 2;
+// Alternate-day email schedule
+const ALTERNATE_DAY_START_DATE = "2026-11-25";
 
-const MODULES = [
-    "AMC",
-    "Warranty",
-    "Software License",
-    "Insurance",
-    "Pollution",
-    "Compliance",
-    "Machinery",
-    "Service",
+const MODULE_CONFIG = [
+    {
+        name: "AMC",
+        collection: "it_devices",
+        allowedTypes: ["amc"],
+        expiryFields: ["endDate"],
+    },
+    {
+        name: "Warranty",
+        collection: "it_devices",
+        allowedTypes: ["warranty"],
+        expiryFields: [
+            "warrantyExpiry",
+            "warrantyExpired",
+            "endDate",
+            "expiryDate",
+        ],
+    },
+    {
+        name: "Software License",
+        collection: "it_devices",
+        allowedTypes: ["software license"],
+        expiryFields: ["expiryDate"],
+    },
+    {
+        name: "Insurance",
+        collection: "vehicles",
+        allowedTypes: ["insurance"],
+        expiryFields: ["expiryDate"],
+    },
+    {
+        name: "Pollution",
+        collection: "vehicles",
+        allowedTypes: ["pollution"],
+        expiryFields: ["expiryDate", "pollutionExpiryDate"],
+    },
+    {
+        name: "Compliance",
+        collection: "compliance_records",
+        requiredCategory: "Compliance",
+        requiredType: "Compliance",
+        expiryFields: [
+            "validTill",
+            "validUntil",
+            "validTillDate",
+            "expiryDate",
+            "endDate",
+        ],
+    },
+    {
+        name: "Machinery",
+        collection: "machinery_records",
+        requiredCategory: "Machinery",
+        requiredType: "Machinery",
+        expiryFields: ["nextDueDate"],
+        extraExpiryField: "amcEndDate",
+    },
+    {
+        name: "Service",
+        collection: "vehicles",
+        requiredCategory: "Vehicles",
+        requiredType: "Service",
+        expiryFields: ["nextServiceDueDate"],
+    },
 ];
 
-const FREQUENCY_OPTIONS = [1, 2, 3, 5, 7, 10, 15];
+if (
+    TEST_MODE &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(TEST_EMAIL)
+) {
+    throw new Error(
+        "TEST_MODE is ON. Configure a valid TEST_EMAIL GitHub Secret."
+    );
+}
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-const EMAIL_TIME_OPTIONS = Array.from({ length: 65 }, (_, index) => {
-    const totalMinutes = 360 + index * 15;
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-
-    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
 });
 
-function formatTimeLabel(value) {
-    const [hours, minutes] = value.split(":").map(Number);
-    const suffix = hours >= 12 ? "PM" : "AM";
-    const displayHour = hours % 12 || 12;
+const db = admin.firestore();
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-    return `${String(displayHour).padStart(2, "0")}:${String(minutes).padStart(2, "0")} ${suffix}`;
+// -------------------- DATE / VALUE HELPERS --------------------
+
+function dateInIndia(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(date);
+
+    const values = {};
+
+    for (const part of parts) {
+        values[part.type] = part.value;
+    }
+
+    return `${values.year}-${values.month}-${values.day}`;
 }
 
-function frequencyLabel(days) {
-    if (days === 1) return "Every day";
-    if (days === 2) return "Every 2 days (Alternate days)";
-    return `Every ${days} days`;
+function isValidDateString(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return false;
+    }
+
+    const [year, month, day] = value.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    return (
+        date.getUTCFullYear() === year &&
+        date.getUTCMonth() === month - 1 &&
+        date.getUTCDate() === day
+    );
 }
 
-function normalizeRole(value) {
+function getTodayInIndia() {
+    return dateInIndia(new Date());
+}
+
+function toDateString(value) {
+    if (!value) return "";
+
+    if (typeof value === "string") {
+        const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+
+        if (match) {
+            return isValidDateString(match[1]) ? match[1] : "";
+        }
+
+        const parsed = new Date(value);
+
+        return Number.isNaN(parsed.getTime())
+            ? ""
+            : dateInIndia(parsed);
+    }
+
+    if (typeof value.toDate === "function") {
+        return dateInIndia(value.toDate());
+    }
+
+    if (value instanceof Date) {
+        return dateInIndia(value);
+    }
+
+    if (typeof value === "object" && Number.isFinite(value.seconds)) {
+        return dateInIndia(new Date(value.seconds * 1000));
+    }
+
+    return "";
+}
+
+function daysBetween(from, to) {
+    const [fy, fm, fd] = from.split("-").map(Number);
+    const [ty, tm, td] = to.split("-").map(Number);
+
+    return (
+        Date.UTC(ty, tm - 1, td) -
+        Date.UTC(fy, fm - 1, fd)
+    ) / 86400000;
+}
+
+function firstValue(data, keys) {
+    for (const key of keys) {
+        if (
+            data[key] !== undefined &&
+            data[key] !== null &&
+            data[key] !== ""
+        ) {
+            return data[key];
+        }
+    }
+
+    return "";
+}
+
+function firstValidDate(data, keys) {
+    for (const key of keys) {
+        const date = toDateString(data[key]);
+
+        if (date) {
+            return {
+                date,
+                field: key,
+            };
+        }
+    }
+
+    return {
+        date: "",
+        field: "",
+    };
+}
+
+function normalize(value) {
     return String(value || "")
         .trim()
         .toLowerCase()
@@ -63,1191 +245,1009 @@ function normalizeRole(value) {
         .replace(/\s+/g, " ");
 }
 
-function isSuperAdminUser(profile) {
-    const role = normalizeRole(profile?.role);
-
-    return (
-        profile?.active === true &&
-        ["super admin", "superadmin"].includes(role)
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+        String(email || "").trim()
     );
 }
 
-function cleanReminderDays(value) {
-    if (!Array.isArray(value)) return DEFAULT_DAYS;
+function displayDate(value) {
+    if (!value || !isValidDateString(value)) {
+        return "Not available";
+    }
 
-    const numbers = value
-        .map(Number)
-        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 365);
+    const [year, month, day] = value.split("-");
 
-    return [...new Set([...numbers, 0])].sort((a, b) => b - a);
+    return `${day}-${month}-${year}`;
 }
 
-function cleanEmailTime(value) {
-    return EMAIL_TIME_OPTIONS.includes(value)
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+    })[c]);
+}
+
+// -------------------- SETTINGS / TIME --------------------
+
+function getLegacyReminderDays(settings) {
+    if (!Array.isArray(settings?.reminderDays)) {
+        return DEFAULT_REMINDER_DAYS;
+    }
+
+    const valid = settings.reminderDays
+        .map(Number)
+        .filter(
+            (day) =>
+                Number.isInteger(day) &&
+                day >= 0 &&
+                day <= 365
+        );
+
+    return [...new Set(valid)].sort((a, b) => b - a);
+}
+
+function getEmailTime(settings) {
+    const value = String(
+        settings?.emailTime || DEFAULT_EMAIL_TIME
+    ).trim();
+
+    return /^([01]\d|2[0-3]):(00|15|30|45)$/.test(value)
         ? value
         : DEFAULT_EMAIL_TIME;
 }
 
-function cleanFrequency(value, fallback = DEFAULT_REGULAR_FREQUENCY) {
-    const number = Number(value);
+function getCurrentTimeInIndia() {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: TIME_ZONE,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(new Date());
 
-    return FREQUENCY_OPTIONS.includes(number)
-        ? number
-        : fallback;
-}
+    const values = {};
 
-function createEmptySchedules() {
-    return Object.fromEntries(
-        MODULES.map((moduleName) => [moduleName, []])
-    );
-}
-
-function createDefaultModuleEnabled() {
-    return Object.fromEntries(
-        MODULES.map((moduleName) => [moduleName, true])
-    );
-}
-
-function createDefaultOverdueSettings() {
-    return Object.fromEntries(
-        MODULES.map((moduleName) => [
-            moduleName,
-            {
-                enabled: false,
-                frequencyDays: 2,
-                recipients: [],
-            },
-        ])
-    );
-}
-
-function normalizeScheduleEntries(entries, validUids) {
-    if (!Array.isArray(entries)) return [];
-
-    const cleaned = entries
-        .map((entry) => {
-            const daysBefore = Number(entry?.daysBefore);
-
-            if (
-                !Number.isInteger(daysBefore) ||
-                daysBefore < 0 ||
-                daysBefore > 365
-            ) {
-                return null;
-            }
-
-            const recipients = Array.isArray(entry?.recipients)
-                ? [...new Set(entry.recipients.map(String))]
-                    .filter((uid) => validUids.has(uid))
-                : [];
-
-            return {
-                daysBefore,
-                recipients,
-            };
-        })
-        .filter(Boolean);
-
-    const uniqueDays = new Map();
-
-    for (const entry of cleaned) {
-        uniqueDays.set(entry.daysBefore, entry);
+    for (const part of parts) {
+        values[part.type] = part.value;
     }
 
-    return [...uniqueDays.values()].sort(
-        (a, b) => b.daysBefore - a.daysBefore
-    );
+    return `${values.hour}:${values.minute}`;
 }
 
-function createLegacySchedules(settings, validUids) {
-    const schedules = createEmptySchedules();
+function isEmailTimeReached(emailTime) {
+    const currentTime = getCurrentTimeInIndia();
 
-    const legacyDays = cleanReminderDays(settings.reminderDays);
+    return {
+        reached: currentTime >= emailTime,
+        currentTime,
+    };
+}
 
-    const legacyOperators =
-        settings.moduleOperators &&
-            typeof settings.moduleOperators === "object"
-            ? settings.moduleOperators
+async function getReminderSettings() {
+    const snapshot = await db
+        .collection("app_settings")
+        .doc("expiryReminders")
+        .get();
+
+    return snapshot.exists ? snapshot.data() : {};
+}
+
+// -------------------- MODULE SCHEDULES --------------------
+
+function getModuleSchedule(settings, moduleName) {
+    const moduleSchedules =
+        settings?.moduleSchedules &&
+            typeof settings.moduleSchedules === "object"
+            ? settings.moduleSchedules
             : {};
 
-    for (const moduleName of MODULES) {
-        const oldRecipients = Array.isArray(legacyOperators[moduleName])
-            ? [...new Set(legacyOperators[moduleName].map(String))]
-                .filter((uid) => validUids.has(uid))
+    const schedule = moduleSchedules[moduleName];
+
+    if (!Array.isArray(schedule)) {
+        return [];
+    }
+
+    return schedule
+        .map((item) => ({
+            daysBefore: Number(item?.daysBefore),
+            recipients: Array.isArray(item?.recipients)
+                ? [...new Set(item.recipients.map(String))]
+                : [],
+        }))
+        .filter(
+            (item) =>
+                Number.isInteger(item.daysBefore) &&
+                item.daysBefore >= 0 &&
+                item.daysBefore <= 365
+        );
+}
+
+function getAllConfiguredDays(settings) {
+    const allDays = new Set();
+
+    for (const config of MODULE_CONFIG) {
+        const schedule = getModuleSchedule(settings, config.name);
+
+        for (const item of schedule) {
+            allDays.add(item.daysBefore);
+        }
+    }
+
+    return [...allDays].sort((a, b) => b - a);
+}
+
+// -------------------- USERS --------------------
+
+async function getUserDirectory() {
+    const snapshot = await db.collection("users").get();
+
+    const usersByUid = new Map();
+
+    for (const document of snapshot.docs) {
+        const data = document.data();
+
+        const email = String(data.email || "")
+            .trim()
+            .toLowerCase();
+
+        const active = data.active === true;
+
+        const user = {
+            uid: document.id,
+            name: String(data.name || data.displayName || ""),
+            email,
+            role: String(data.role || ""),
+            normalizedRole: normalize(data.role),
+            active,
+        };
+
+        usersByUid.set(document.id, user);
+    }
+
+    return usersByUid;
+}
+
+function getConfiguredUsers(uids, usersByUid) {
+    return [...new Set((uids || []).map(String))]
+        .map((uid) => usersByUid.get(uid))
+        .filter(
+            (user) =>
+                user &&
+                user.active === true &&
+                isValidEmail(user.email)
+        );
+}
+
+// -------------------- MODULE MATCHING --------------------
+
+function matchesModuleRecord(data, config) {
+    if (config.requiredCategory || config.requiredType) {
+        const categoryMatches =
+            !config.requiredCategory ||
+            normalize(data.category) === normalize(config.requiredCategory);
+
+        const typeMatches =
+            !config.requiredType ||
+            normalize(data.type) === normalize(config.requiredType);
+
+        return categoryMatches && typeMatches;
+    }
+
+    const recordTypes = [
+        data.type,
+        data.category,
+        data.module,
+        data.recordType,
+    ]
+        .filter(Boolean)
+        .map(normalize);
+
+    return recordTypes.some((type) =>
+        config.allowedTypes.includes(type)
+    );
+}
+
+// -------------------- READ RECORDS --------------------
+
+async function readModuleRecords(
+    config,
+    today,
+    configuredDays,
+    includeOverdue = true
+) {
+    const snapshot = await db.collection(config.collection).get();
+    const records = [];
+
+    const daySet = new Set(configuredDays);
+
+    for (const document of snapshot.docs) {
+        const data = document.data();
+
+        if (!matchesModuleRecord(data, config)) {
+            continue;
+        }
+
+        const primary = firstValidDate(
+            data,
+            config.expiryFields || []
+        );
+
+        const expiryCandidates = [];
+
+        if (primary.date) {
+            expiryCandidates.push({
+                expiryDate: primary.date,
+                expiryField: primary.field,
+            });
+        }
+
+        // Machinery AMC end date is a separate reminder.
+        // Consider it only when AMC Applicable is Yes.
+        if (
+            config.extraExpiryField &&
+            normalize(data.amcApplicable) === "yes"
+        ) {
+            const extraDate = toDateString(
+                data[config.extraExpiryField]
+            );
+
+            if (extraDate && extraDate !== primary.date) {
+                expiryCandidates.push({
+                    expiryDate: extraDate,
+                    expiryField: config.extraExpiryField,
+                });
+            }
+        }
+
+        if (!expiryCandidates.length) {
+            console.log(
+                `Skipped ${config.name} record ${document.id}: no valid expiry/due date.`
+            );
+
+            continue;
+        }
+
+        const title = firstValue(data, [
+            "productName",
+            "licenseName",
+            "product",
+            "item",
+            "machineryName",
+            "machineName",
+            "vehicleName",
+            "vehicleNo",
+            "vehicleNumber",
+            "policyNo",
+            "certificateNo",
+            "examinationType",
+            "name",
+            "title",
+        ]);
+
+        const company = firstValue(data, [
+            "company",
+            "companyName",
+            "vendor",
+            "supplier",
+            "insuranceCompany",
+            "insurerCompany",
+            "serviceProvider",
+            "companyVendor",
+            "partnerCompany",
+            "pucCentre",
+            "pucCenter",
+            "serviceCentre",
+            "serviceCenter",
+            "unit",
+        ]);
+
+        for (const candidate of expiryCandidates) {
+            const daysLeft = daysBetween(
+                today,
+                candidate.expiryDate
+            );
+
+            // Include overdue only when requested.
+            // Test Mode requests overdue so they can be tested.
+            const isOverdue = daysLeft < 0;
+
+            const isConfiguredDay = daySet.has(daysLeft);
+
+            if (
+                (isOverdue && includeOverdue) ||
+                (!isOverdue && isConfiguredDay)
+            ) {
+                records.push({
+                    id: document.id,
+                    recordKey: `${config.name}_${document.id}_${candidate.expiryField}`,
+                    module: config.name,
+                    title: String(title || "Record"),
+                    company: String(company || "Not specified"),
+                    expiryDate: candidate.expiryDate,
+                    expiryField: candidate.expiryField,
+                    daysLeft,
+                });
+            }
+        }
+    }
+
+    return records;
+}
+
+async function getModuleExpiryRecords(
+    config,
+    today,
+    settings,
+    includeOverdue = true
+) {
+    const moduleSettings = settings?.moduleSettings?.[config.name];
+
+    if (moduleSettings?.enabled === false) {
+        console.log(`Reminders disabled for module: ${config.name}`);
+        return [];
+    }
+
+    const schedule = getModuleSchedule(settings, config.name);
+
+    const configuredDays = schedule.map(
+        (item) => item.daysBefore
+    );
+
+    // Fallback for old settings before moduleSchedules exists.
+    // This fallback is used only if moduleSchedules is absent.
+    const hasNewSettings =
+        settings?.moduleSchedules &&
+        typeof settings.moduleSchedules === "object";
+
+    const daysToCheck = hasNewSettings
+        ? configuredDays
+        : getLegacyReminderDays(settings);
+
+    return readModuleRecords(
+        config,
+        today,
+        daysToCheck,
+        includeOverdue
+    );
+}
+
+async function getAllExpiryRecords(
+    today,
+    settings,
+    includeOverdue = true
+) {
+    const results = await Promise.all(
+        MODULE_CONFIG.map((config) =>
+            getModuleExpiryRecords(
+                config,
+                today,
+                settings,
+                includeOverdue
+            )
+        )
+    );
+
+    return results
+        .flat()
+        .sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+// -------------------- EMAIL CONTENT --------------------
+
+function getReminderLabel(record) {
+    if (record.daysLeft < 0) {
+        return `OVERDUE by ${Math.abs(record.daysLeft)} day(s)`;
+    }
+
+    if (record.daysLeft === 0) {
+        return "EXPIRES / DUE TODAY";
+    }
+
+    return `Due in ${record.daysLeft} day(s)`;
+}
+
+function buildEmailHtml(records, today, isTest) {
+    const rows = records
+        .map(
+            (record) => `
+                <tr>
+                    <td style="padding:12px;border:1px solid #e5e7eb;">
+                        ${escapeHtml(record.module)}
+                    </td>
+                    <td style="padding:12px;border:1px solid #e5e7eb;">
+                        ${escapeHtml(record.title)}
+                    </td>
+                    <td style="padding:12px;border:1px solid #e5e7eb;white-space:nowrap;">
+                        ${escapeHtml(displayDate(record.expiryDate))}
+                    </td>
+                    <td style="padding:12px;border:1px solid #e5e7eb;">
+                        ${escapeHtml(getReminderLabel(record))}
+                    </td>
+                </tr>
+            `
+        )
+        .join("");
+
+    const appLinkIsValid =
+        /^https:\/\/.+/i.test(APP_URL) ||
+        /^http:\/\/localhost(?::\d+)?(?:\/.*)?$/i.test(APP_URL);
+
+    const appButton = appLinkIsValid
+        ? `
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0;">
+                <tr>
+                    <td bgcolor="#0b4da2" style="background-color:#0b4da2;border-radius:5px;text-align:center;">
+                        <a href="${escapeHtml(APP_URL)}"
+                           target="_blank"
+                           style="display:inline-block;padding:12px 24px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:5px;">
+                            Open AIL Tracker
+                        </a>
+                    </td>
+                </tr>
+            </table>
+        `
+        : `
+            <p style="margin:24px 0;color:#6b7280;font-size:13px;">
+                Please open the Company Records &amp; Expiry Tracker
+                to review the records.
+            </p>
+        `;
+
+    return `
+        <div style="
+            background:#f4f6f8;
+            padding:24px 10px;
+            font-family:Arial,Helvetica,sans-serif;
+            color:#1f2937;
+        ">
+            <div style="
+                max-width:700px;
+                margin:0 auto;
+                background:#ffffff;
+                border:1px solid #e5e7eb;
+            ">
+                <div style="padding:24px 28px 18px;">
+                    <div style="
+                        font-size:20px;
+                        font-weight:bold;
+                        color:#0b4da2;
+                        letter-spacing:0.3px;
+                    ">
+                        AMIN INTERNATIONAL LIMITED
+                    </div>
+
+                    <div style="
+                        height:3px;
+                        background:#0b4da2;
+                        margin-top:14px;
+                    "></div>
+
+                    <h2 style="
+                        font-size:19px;
+                        font-weight:600;
+                        margin:22px 0 8px;
+                        color:#1f2937;
+                    ">
+                        Expiry &amp; Renewal Reminder
+                    </h2>
+
+                    ${isTest
+            ? `
+                                <div style="
+                                    background:#fff7ed;
+                                    border:1px solid #fed7aa;
+                                    padding:10px 12px;
+                                    margin:14px 0;
+                                    font-size:13px;
+                                    color:#9a3412;
+                                ">
+                                    <strong>TEST EMAIL</strong> ΓÇö This email
+                                    was sent only to the configured test email
+                                    address. No actual reminder routing was used.
+                                </div>
+                            `
+            : ""
+        }
+
+                    <p style="font-size:14px;margin:22px 0 12px;">
+                        Dear User,
+                    </p>
+
+                    <p style="
+                        font-size:14px;
+                        line-height:1.7;
+                        margin:0 0 18px;
+                    ">
+                        ${records.length
+            ? "This is a reminder to review the following records that are approaching their expiry or due date:"
+            : "This is a test email to verify the email reminder system. No configured reminders are due today."
+        }
+                    </p>
+
+                    <div style="
+                        font-size:13px;
+                        color:#6b7280;
+                        margin-bottom:16px;
+                    ">
+                        Date: ${escapeHtml(displayDate(today))}
+                    </div>
+
+                    ${records.length
+            ? `
+                                <table style="
+                                    width:100%;
+                                    border-collapse:collapse;
+                                    font-size:13px;
+                                ">
+                                    <thead>
+                                        <tr style="
+                                            background:#f1f5f9;
+                                            color:#1f2937;
+                                            text-align:left;
+                                        ">
+                                            <th style="padding:11px;border:1px solid #e5e7eb;">
+                                                Module
+                                            </th>
+                                            <th style="padding:11px;border:1px solid #e5e7eb;">
+                                                Record
+                                            </th>
+                                            <th style="padding:11px;border:1px solid #e5e7eb;">
+                                                Expiry / Due Date
+                                            </th>
+                                            <th style="padding:11px;border:1px solid #e5e7eb;">
+                                                Reminder
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${rows}
+                                    </tbody>
+                                </table>
+
+                                <p style="
+                                    font-size:14px;
+                                    line-height:1.7;
+                                    margin:22px 0 0;
+                                ">
+                                    Please review the above records and take
+                                    the necessary action as required.
+                                </p>
+                            `
+            : ""
+        }
+
+                    ${appButton}
+
+                    <p style="
+                        font-size:14px;
+                        line-height:1.6;
+                        margin:24px 0 0;
+                    ">
+                        Regards,<br>
+                        <strong>AMIN INTERNATIONAL LIMITED</strong>
+                    </p>
+                </div>
+
+                <div style="
+                    background:#f8fafc;
+                    border-top:1px solid #e5e7eb;
+                    padding:14px 28px;
+                    font-size:11px;
+                    color:#6b7280;
+                    line-height:1.6;
+                ">
+                    This is an automated notification from the
+                    Company Records &amp; Expiry Tracker.
+                    Please do not reply to this email.
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// -------------------- DUPLICATE PREVENTION --------------------
+
+function getSendLogId(date, email) {
+    return crypto
+        .createHash("sha256")
+        .update(`${date}_${email}`)
+        .digest("hex");
+}
+
+async function claimDailySend(date, email, records) {
+    const logRef = db
+        .collection("email_reminder_logs")
+        .doc(getSendLogId(date, email));
+
+    return db.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(logRef);
+
+        if (snapshot.exists) {
+            const existing = snapshot.data();
+
+            if (
+                existing.status === "sent" ||
+                existing.status === "sending"
+            ) {
+                return {
+                    allowed: false,
+                    logRef,
+                    status: existing.status,
+                };
+            }
+        }
+
+        transaction.set(
+            logRef,
+            {
+                date,
+                email,
+                status: "sending",
+                modules: [
+                    ...new Set(records.map((record) => record.module)),
+                ],
+                recordCount: records.length,
+                updatedAt:
+                    admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+
+        return {
+            allowed: true,
+            logRef,
+            status: "sending",
+        };
+    });
+}
+
+async function markEmailFailed(logRef, error) {
+    try {
+        await logRef.set(
+            {
+                status: "failed",
+                error: String(
+                    error?.message || "Email send failed"
+                ).slice(0, 500),
+                updatedAt:
+                    admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    } catch (logError) {
+        console.error(
+            "Could not update failed email log:",
+            logError.message
+        );
+    }
+
+    console.error("Email send failed:", error?.message || error);
+}
+
+async function sendOneEmail(email, records, today, isTest) {
+    const claim = await claimDailySend(
+        today,
+        email,
+        records
+    );
+
+    if (!claim.allowed) {
+        console.log(
+            `Skipped email for ${email}. Existing log status: ${claim.status}.`
+        );
+
+        return false;
+    }
+
+    const subject = isTest
+        ? `TEST ΓÇö Expiry Reminder (${today})`
+        : `Expiry Reminder: ${records.length} record(s) require attention`;
+
+    let resendResult;
+
+    try {
+        resendResult = await resend.emails.send({
+            from: EMAIL_FROM,
+            to: [email],
+            subject,
+            html: buildEmailHtml(records, today, isTest),
+        });
+    } catch (error) {
+        await markEmailFailed(claim.logRef, error);
+        return false;
+    }
+
+    if (resendResult?.error) {
+        await markEmailFailed(
+            claim.logRef,
+            new Error(
+                resendResult.error.message ||
+                "Resend rejected the email."
+            )
+        );
+
+        return false;
+    }
+
+    try {
+        await claim.logRef.update({
+            status: "sent",
+            resendId: resendResult?.data?.id || null,
+            sentAt:
+                admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt:
+                admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        console.log(`Email accepted by Resend for ${email}.`);
+
+        return true;
+    } catch (error) {
+        console.error(
+            `Email was accepted by Resend for ${email}, but the Firestore sent-log update failed. Manual log inspection is required:`,
+            error.message
+        );
+
+        return false;
+    }
+}
+
+// -------------------- ROUTING --------------------
+
+function addRecordToRecipient(
+    recipientMap,
+    email,
+    record
+) {
+    const normalizedEmail = String(email || "")
+        .trim()
+        .toLowerCase();
+
+    if (!isValidEmail(normalizedEmail)) {
+        return;
+    }
+
+    if (!recipientMap.has(normalizedEmail)) {
+        recipientMap.set(normalizedEmail, []);
+    }
+
+    const list = recipientMap.get(normalizedEmail);
+
+    const key =
+        record.recordKey ||
+        `${record.module}_${record.id}`;
+
+    if (
+        !list.some(
+            (item) =>
+                (item.recordKey ||
+                    `${item.module}_${item.id}`) === key
+        )
+    ) {
+        list.push(record);
+    }
+}
+
+function getScheduleRecipientsForDay(
+    schedule,
+    daysLeft
+) {
+    const matching = schedule.filter(
+        (item) => item.daysBefore === daysLeft
+    );
+
+    return [
+        ...new Set(
+            matching.flatMap((item) => item.recipients || [])
+        ),
+    ];
+}
+
+async function buildProductionRecipients(
+    records,
+    settings,
+    usersByUid
+) {
+    const recipientMap = new Map();
+
+    for (const config of MODULE_CONFIG) {
+        const moduleRecords = records.filter(
+            (record) => record.module === config.name
+        );
+
+        if (!moduleRecords.length) {
+            continue;
+        }
+
+        const schedule = getModuleSchedule(
+            settings,
+            config.name
+        );
+
+        for (const record of moduleRecords) {
+            // Production overdue reminders are currently disabled.
+            if (record.daysLeft < 0) {
+                console.log(
+                    `Overdue production routing disabled: ${config.name} / ${record.title}`
+                );
+
+                continue;
+            }
+
+            const recipientUids =
+                getScheduleRecipientsForDay(
+                    schedule,
+                    record.daysLeft
+                );
+
+            if (!recipientUids.length) {
+                console.log(
+                    `No recipients configured for ${config.name}, ${record.daysLeft} day(s).`
+                );
+
+                continue;
+            }
+
+            const users = getConfiguredUsers(
+                recipientUids,
+                usersByUid
+            );
+
+            if (!users.length) {
+                console.log(
+                    `No active users with valid emails for ${config.name}, ${record.daysLeft} day(s).`
+                );
+
+                continue;
+            }
+
+            for (const user of users) {
+                addRecordToRecipient(
+                    recipientMap,
+                    user.email,
+                    record
+                );
+            }
+        }
+    }
+
+    return recipientMap;
+}
+
+// -------------------- MAIN --------------------
+
+async function main() {
+    const today = getTodayInIndia();
+    const settings = await getReminderSettings();
+
+    const emailTime = getEmailTime(settings);
+    const timeCheck = isEmailTimeReached(emailTime);
+
+    if (!timeCheck.reached) {
+        console.log(`Email time not reached (${timeCheck.currentTime} IST).`);
+        return;
+    }
+
+    const regularFrequencyDays = Number(settings.regularFrequencyDays) || 2;
+    const daysSinceStart = daysBetween(ALTERNATE_DAY_START_DATE, today);
+
+    const isRegularSendDay =
+        daysSinceStart >= 0 &&
+        daysSinceStart % regularFrequencyDays === 0;
+
+    console.log(`India date: ${today}`);
+    console.log(`Regular frequency: every ${regularFrequencyDays} day(s).`);
+    console.log(`Regular reminders today: ${isRegularSendDay ? "YES" : "NO"}`);
+
+    // Regular reminders: only on configured regular frequency days.
+    const regularRecords = isRegularSendDay
+        ? await getAllExpiryRecords(today, settings, false)
+        : [];
+
+    // Overdue records: independently controlled per module.
+    const allOverdueRecords = await getAllExpiryRecords(today, settings, true);
+
+    const overdueRecords = allOverdueRecords.filter((record) => {
+        if (record.daysLeft >= 0) return false;
+
+        const moduleSettings = settings?.moduleSettings?.[record.module];
+
+        if (moduleSettings?.enabled === false) return false;
+        if (moduleSettings?.overdueEnabled !== true) return false;
+
+        const interval = Number(moduleSettings.overdueIntervalDays) || 2;
+        const daysOverdue = Math.abs(record.daysLeft);
+
+        return daysOverdue % interval === 0;
+    });
+
+    console.log(`Regular records: ${regularRecords.length}`);
+    console.log(`Overdue records eligible today: ${overdueRecords.length}`);
+
+    const combinedRecords = [...regularRecords, ...overdueRecords];
+
+    // SAFE TEST MODE: all eligible records go only to TEST_EMAIL.
+    if (TEST_MODE && !ROUTING_DRY_RUN) {
+        console.log("SAFE TEST MODE active. Sending only to TEST_EMAIL.");
+
+        if (!combinedRecords.length && !FORCE_TEST_EMAIL) {
+            console.log("No eligible records. Test email skipped.");
+            return;
+        }
+
+        await sendOneEmail(TEST_EMAIL, combinedRecords, today, true);
+        return;
+    }
+
+    const usersByUid = await getUserDirectory();
+    const recipientMap = await buildProductionRecipients(
+        regularRecords,
+        settings,
+        usersByUid
+    );
+
+    // Route overdue reminders only to the module's selected overdue recipients.
+    for (const record of overdueRecords) {
+        const moduleSettings = settings?.moduleSettings?.[record.module];
+        const recipientUids = Array.isArray(moduleSettings?.overdueRecipients)
+            ? moduleSettings.overdueRecipients
             : [];
 
-        schedules[moduleName] = legacyDays.map((daysBefore) => ({
-            daysBefore,
-            recipients: [...oldRecipients],
-        }));
-    }
+        const users = getConfiguredUsers(recipientUids, usersByUid);
 
-    return schedules;
-}
-
-function normalizeModuleEnabled(raw) {
-    const defaults = createDefaultModuleEnabled();
-
-    if (!raw || typeof raw !== "object") {
-        return defaults;
-    }
-
-    for (const moduleName of MODULES) {
-        if (typeof raw[moduleName] === "boolean") {
-            defaults[moduleName] = raw[moduleName];
+        for (const user of users) {
+            addRecordToRecipient(recipientMap, user.email, record);
         }
     }
 
-    return defaults;
-}
-
-function normalizeOverdueSettings(raw, validUids) {
-    const defaults = createDefaultOverdueSettings();
-
-    if (!raw || typeof raw !== "object") {
-        return defaults;
-    }
-
-    for (const moduleName of MODULES) {
-        const item = raw[moduleName];
-
-        if (!item || typeof item !== "object") continue;
-
-        defaults[moduleName] = {
-            enabled: item.enabled === true,
-            frequencyDays: cleanFrequency(
-                item.frequencyDays,
-                2
-            ),
-            recipients: Array.isArray(item.recipients)
-                ? [...new Set(item.recipients.map(String))]
-                    .filter((uid) => validUids.has(uid))
-                : [],
-        };
-    }
-
-    return defaults;
-}
-
-function SectionTitle({ title, description }) {
-    return (
-        <div>
-            <h2 className="text-base font-bold text-slate-900">
-                {title}
-            </h2>
-
-            {description && (
-                <p className="mt-1 text-sm text-slate-600">
-                    {description}
-                </p>
-            )}
-        </div>
-    );
-}
-
-function UserCheckbox({ user, checked, onChange }) {
-    return (
-        <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-100 px-3 py-3 hover:bg-slate-50">
-            <input
-                type="checkbox"
-                checked={checked}
-                onChange={(event) => onChange(event.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-            />
-
-            <span className="min-w-0">
-                <span className="block text-sm font-medium text-slate-800">
-                    {user.name}
-                </span>
-
-                <span className="block break-all text-xs text-slate-500">
-                    {user.email}
-                </span>
-
-                <span className="mt-1 inline-block rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                    {user.role}
-                </span>
-            </span>
-        </label>
-    );
-}
-
-export default function ReminderSettingsPage() {
-    const router = useRouter();
-
-    const [loading, setLoading] = useState(true);
-    const [saving, setSaving] = useState(false);
-    const [allowed, setAllowed] = useState(false);
-
-    const [emailTime, setEmailTime] = useState(DEFAULT_EMAIL_TIME);
-    const [regularFrequencyDays, setRegularFrequencyDays] = useState(
-        DEFAULT_REGULAR_FREQUENCY
-    );
-
-    const [users, setUsers] = useState([]);
-
-    const [moduleSchedules, setModuleSchedules] = useState(
-        createEmptySchedules()
-    );
-
-    const [moduleEnabled, setModuleEnabled] = useState(
-        createDefaultModuleEnabled()
-    );
-
-    const [overdueSettings, setOverdueSettings] = useState(
-        createDefaultOverdueSettings()
-    );
-
-    const [selectedModule, setSelectedModule] = useState("AMC");
-    const [newReminderDay, setNewReminderDay] = useState("");
-
-    const [error, setError] = useState("");
-    const [success, setSuccess] = useState("");
-
-    useEffect(() => {
-        let cancelled = false;
-
-        const unsubscribe = onAuthStateChanged(auth, async (user) => {
-            setAllowed(false);
-            setError("");
-            setSuccess("");
-
-            if (!user) {
-                router.replace("/");
-                return;
-            }
-
-            setLoading(true);
-
-            try {
-                const profileSnapshot = await getDoc(
-                    doc(db, "users", user.uid)
-                );
-
-                if (cancelled) return;
-
-                const profile = profileSnapshot.exists()
-                    ? profileSnapshot.data()
-                    : {};
-
-                const permitted = isSuperAdminUser(profile);
-
-                setAllowed(permitted);
-
-                if (!permitted) {
-                    setError(
-                        "Only an active Super Admin can change expiry reminder settings."
-                    );
-                    setLoading(false);
-                    return;
-                }
-
-                const [settingsSnapshot, usersSnapshot] = await Promise.all([
-                    getDoc(SETTINGS_REF),
-                    getDocs(collection(db, "users")),
-                ]);
-
-                if (cancelled) return;
-
-                const settings = settingsSnapshot.exists()
-                    ? settingsSnapshot.data()
-                    : {};
-
-                const activeUsers = usersSnapshot.docs
-                    .map((item) => {
-                        const data = item.data();
-
-                        return {
-                            uid: item.id,
-                            name: String(
-                                data.name ||
-                                data.displayName ||
-                                data.email ||
-                                "User"
-                            ).trim(),
-                            email: String(data.email || "")
-                                .trim()
-                                .toLowerCase(),
-                            role: String(data.role || "Viewer"),
-                            active: data.active === true,
-                        };
-                    })
-                    .filter(
-                        (item) =>
-                            item.active &&
-                            EMAIL_RE.test(item.email)
-                    )
-                    .sort((a, b) => a.name.localeCompare(b.name));
-
-                const validUids = new Set(
-                    activeUsers.map((item) => item.uid)
-                );
-
-                let loadedSchedules;
-
-                if (
-                    settings.moduleSchedules &&
-                    typeof settings.moduleSchedules === "object"
-                ) {
-                    loadedSchedules = createEmptySchedules();
-
-                    for (const moduleName of MODULES) {
-                        loadedSchedules[moduleName] =
-                            normalizeScheduleEntries(
-                                settings.moduleSchedules[moduleName],
-                                validUids
-                            );
-                    }
-                } else {
-                    loadedSchedules = createLegacySchedules(
-                        settings,
-                        validUids
-                    );
-                }
-
-                setUsers(activeUsers);
-                setModuleSchedules(loadedSchedules);
-                setEmailTime(cleanEmailTime(settings.emailTime));
-
-                setRegularFrequencyDays(
-                    cleanFrequency(
-                        settings.regularFrequencyDays,
-                        DEFAULT_REGULAR_FREQUENCY
-                    )
-                );
-
-                setModuleEnabled(
-                    normalizeModuleEnabled(settings.moduleEnabled)
-                );
-
-                setOverdueSettings(
-                    normalizeOverdueSettings(
-                        settings.overdueSettings,
-                        validUids
-                    )
-                );
-
-                setLoading(false);
-            } catch (err) {
-                console.error("Reminder settings load error:", err);
-
-                if (!cancelled) {
-                    setError(
-                        "Settings or users could not be loaded. Check Firestore permissions."
-                    );
-                    setLoading(false);
-                }
-            }
-        });
-
-        return () => {
-            cancelled = true;
-            unsubscribe();
-        };
-    }, [router]);
-
-    const currentSchedule = moduleSchedules[selectedModule] || [];
-
-    const currentOverdue = overdueSettings[selectedModule] || {
-        enabled: false,
-        frequencyDays: 2,
-        recipients: [],
-    };
-
-    const totalAssignments = useMemo(() => {
-        return MODULES.reduce((total, moduleName) => {
-            const entries = moduleSchedules[moduleName] || [];
-
-            return (
-                total +
-                entries.reduce(
-                    (count, entry) =>
-                        count + (entry.recipients?.length || 0),
-                    0
-                )
-            );
-        }, 0);
-    }, [moduleSchedules]);
-
-    const totalOverdueAssignments = useMemo(() => {
-        return MODULES.reduce((total, moduleName) => {
-            const config = overdueSettings[moduleName];
-
-            if (!config?.enabled) return total;
-
-            return total + (config.recipients?.length || 0);
-        }, 0);
-    }, [overdueSettings]);
-
-    const enabledModulesCount = useMemo(() => {
-        return MODULES.filter(
-            (moduleName) => moduleEnabled[moduleName] !== false
-        ).length;
-    }, [moduleEnabled]);
-
-    const overdueEnabledCount = useMemo(() => {
-        return MODULES.filter(
-            (moduleName) => overdueSettings[moduleName]?.enabled
-        ).length;
-    }, [overdueSettings]);
-
-    function addReminderDay() {
-        setError("");
-        setSuccess("");
-
-        const value = newReminderDay.trim();
-
-        if (value === "") {
-            setError("Enter reminder days before adding.");
-            return;
-        }
-
-        const day = Number(value);
-
-        if (!Number.isInteger(day) || day < 0 || day > 365) {
-            setError(
-                "Reminder days must be a whole number between 0 and 365."
-            );
-            return;
-        }
-
-        if (currentSchedule.some((item) => item.daysBefore === day)) {
-            setError(
-                `A ${day}-day reminder already exists for ${selectedModule}.`
-            );
-            return;
-        }
-
-        setModuleSchedules((current) => {
-            const existing = current[selectedModule] || [];
-
-            return {
-                ...current,
-                [selectedModule]: [
-                    ...existing,
-                    {
-                        daysBefore: day,
-                        recipients: [],
-                    },
-                ].sort((a, b) => b.daysBefore - a.daysBefore),
-            };
-        });
-
-        setNewReminderDay("");
-    }
-
-    function removeReminderDay(moduleName, daysBefore) {
-        setModuleSchedules((current) => ({
-            ...current,
-            [moduleName]: (current[moduleName] || []).filter(
-                (item) => item.daysBefore !== daysBefore
-            ),
-        }));
-    }
-
-    function toggleRecipient(moduleName, daysBefore, uid, checked) {
-        setModuleSchedules((current) => {
-            const existing = current[moduleName] || [];
-
-            return {
-                ...current,
-                [moduleName]: existing.map((entry) => {
-                    if (entry.daysBefore !== daysBefore) {
-                        return entry;
-                    }
-
-                    const selected = new Set(entry.recipients || []);
-
-                    if (checked) selected.add(uid);
-                    else selected.delete(uid);
-
-                    return {
-                        ...entry,
-                        recipients: [...selected],
-                    };
-                }),
-            };
-        });
-    }
-
-    function toggleOverdueRecipient(moduleName, uid, checked) {
-        setOverdueSettings((current) => {
-            const config = current[moduleName] || {
-                enabled: false,
-                frequencyDays: 2,
-                recipients: [],
-            };
-
-            const selected = new Set(config.recipients || []);
-
-            if (checked) selected.add(uid);
-            else selected.delete(uid);
-
-            return {
-                ...current,
-                [moduleName]: {
-                    ...config,
-                    recipients: [...selected],
-                },
-            };
-        });
-    }
-
-    function updateOverdue(moduleName, field, value) {
-        setOverdueSettings((current) => ({
-            ...current,
-            [moduleName]: {
-                ...(current[moduleName] || {
-                    enabled: false,
-                    frequencyDays: 2,
-                    recipients: [],
-                }),
-                [field]: value,
-            },
-        }));
-    }
-
-    function toggleModule(moduleName, checked) {
-        setModuleEnabled((current) => ({
-            ...current,
-            [moduleName]: checked,
-        }));
-    }
-
-    async function handleSave(event) {
-        event.preventDefault();
-
-        setError("");
-        setSuccess("");
-
-        if (!EMAIL_TIME_OPTIONS.includes(emailTime)) {
-            setError("Please select a valid email sending time.");
-            return;
-        }
-
-        if (!FREQUENCY_OPTIONS.includes(Number(regularFrequencyDays))) {
-            setError("Please select a valid regular reminder frequency.");
-            return;
-        }
-
-        const validUids = new Set(users.map((user) => user.uid));
-
-        const safeSchedules = createEmptySchedules();
-
-        for (const moduleName of MODULES) {
-            safeSchedules[moduleName] = normalizeScheduleEntries(
-                moduleSchedules[moduleName],
-                validUids
-            );
-        }
-
-        const safeModuleEnabled = normalizeModuleEnabled(moduleEnabled);
-
-        const safeOverdueSettings = normalizeOverdueSettings(
-            overdueSettings,
-            validUids
-        );
-
-        try {
-            setSaving(true);
-
-            await setDoc(
-                SETTINGS_REF,
-                {
-                    moduleSchedules: safeSchedules,
-                    moduleEnabled: safeModuleEnabled,
-                    overdueSettings: safeOverdueSettings,
-                    regularFrequencyDays: Number(regularFrequencyDays),
-                    emailTime,
-                    timeZone: "Asia/Kolkata",
-                    updatedAt: serverTimestamp(),
-                    updatedBy: auth.currentUser?.uid || "",
-                },
-                { merge: true }
-            );
-
-            setModuleSchedules(safeSchedules);
-            setModuleEnabled(safeModuleEnabled);
-            setOverdueSettings(safeOverdueSettings);
-
-            setSuccess(
-                "Reminder settings saved successfully. Email delivery will follow these new settings after the sender function is updated."
-            );
-        } catch (err) {
-            console.error("Reminder settings save error:", err);
-
-            setError(
-                "Could not save settings. Check Firestore permissions."
-            );
-        } finally {
-            setSaving(false);
-        }
-    }
-
-    if (loading) {
-        return (
-            <main className="min-h-screen bg-slate-100 p-8 text-center text-slate-600">
-                Loading reminder settings…
-            </main>
+    console.log("\n========== ROUTING PREVIEW ==========");
+
+    for (const [email, recipientRecords] of recipientMap.entries()) {
+        console.log(`Recipient: ${email}`);
+        console.log(
+            "Records:",
+            recipientRecords.map(
+                (record) => `${record.module}: ${record.title} (${getReminderLabel(record)})`
+            ).join(", ")
         );
     }
 
-    return (
-        <main className="min-h-screen bg-slate-100 p-4 sm:p-6 lg:p-8">
-            <div className="mx-auto max-w-5xl">
-                <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                    <h1 className="text-2xl font-bold text-slate-900">
-                        Expiry Reminder Settings
-                    </h1>
+    console.log("========== END ROUTING PREVIEW ==========\n");
 
-                    {!allowed ? (
-                        <p className="mt-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                            {error}
-                        </p>
-                    ) : (
-                        <form
-                            onSubmit={handleSave}
-                            className="mt-6 space-y-7"
-                        >
-                            {/* GENERAL EMAIL SETTINGS */}
-                            <div className="rounded-xl border border-slate-200 p-4">
-                                <SectionTitle
-                                    title="General Email Settings"
-                                    description="Configure the regular reminder email schedule and sending time."
-                                />
+    if (ROUTING_DRY_RUN) {
+        console.log("ROUTING DRY RUN COMPLETE. No emails sent.");
+        return;
+    }
 
-                                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                                    <label className="block">
-                                        <span className="text-sm font-semibold text-slate-700">
-                                            Regular Reminder Frequency
-                                        </span>
+    if (!recipientMap.size) {
+        console.log("No eligible recipients. Nothing to send.");
+        return;
+    }
 
-                                        <select
-                                            value={regularFrequencyDays}
-                                            onChange={(event) =>
-                                                setRegularFrequencyDays(
-                                                    Number(event.target.value)
-                                                )
-                                            }
-                                            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
-                                        >
-                                            {FREQUENCY_OPTIONS.map((days) => (
-                                                <option key={days} value={days}>
-                                                    {frequencyLabel(days)}
-                                                </option>
-                                            ))}
-                                        </select>
+    let sentCount = 0;
 
-                                        <p className="mt-2 text-xs text-slate-500">
-                                            Applies to regular expiry reminders.
-                                            Overdue reminders use their own
-                                            frequency setting below.
-                                        </p>
-                                    </label>
+    for (const [email, recipientRecords] of recipientMap.entries()) {
+        if (await sendOneEmail(email, recipientRecords, today, false)) {
+            sentCount++;
+        }
+    }
 
-                                    <label className="block">
-                                        <span className="text-sm font-semibold text-slate-700">
-                                            Send Reminder Emails At
-                                        </span>
-
-                                        <select
-                                            value={emailTime}
-                                            onChange={(event) =>
-                                                setEmailTime(event.target.value)
-                                            }
-                                            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
-                                        >
-                                            {EMAIL_TIME_OPTIONS.map((time) => (
-                                                <option
-                                                    key={time}
-                                                    value={time}
-                                                >
-                                                    {formatTimeLabel(time)}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                </div>
-
-                                <div className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
-                                    <strong>Time Zone:</strong> India Standard
-                                    Time (Asia/Kolkata)
-                                    <br />
-                                    <strong>Selected Time:</strong>{" "}
-                                    {formatTimeLabel(emailTime)} IST
-                                    <br />
-                                    <strong>Regular Frequency:</strong>{" "}
-                                    {frequencyLabel(regularFrequencyDays)}
-                                </div>
-                            </div>
-
-                            {/* MODULE SELECTION */}
-                            <div>
-                                <SectionTitle
-                                    title="Select Module"
-                                    description="Select a module to configure its expiry and overdue reminders."
-                                />
-
-                                <select
-                                    value={selectedModule}
-                                    onChange={(event) => {
-                                        setSelectedModule(event.target.value);
-                                        setNewReminderDay("");
-                                        setError("");
-                                        setSuccess("");
-                                    }}
-                                    className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base outline-none focus:border-blue-600"
-                                >
-                                    {MODULES.map((moduleName) => (
-                                        <option
-                                            key={moduleName}
-                                            value={moduleName}
-                                        >
-                                            {moduleName}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            {/* MODULE ON/OFF */}
-                            <div className="rounded-xl border border-slate-200 p-4">
-                                <div className="flex flex-wrap items-center justify-between gap-4">
-                                    <div>
-                                        <h2 className="text-base font-bold text-slate-900">
-                                            {selectedModule} Module Reminders
-                                        </h2>
-
-                                        <p className="mt-1 text-sm text-slate-600">
-                                            Turn off to stop all reminder emails
-                                            for this module.
-                                        </p>
-                                    </div>
-
-                                    <label className="flex cursor-pointer items-center gap-3 rounded-lg bg-slate-50 px-4 py-3">
-                                        <span className="text-sm font-semibold text-slate-700">
-                                            {moduleEnabled[selectedModule]
-                                                ? "Enabled"
-                                                : "Disabled"}
-                                        </span>
-
-                                        <input
-                                            type="checkbox"
-                                            checked={
-                                                moduleEnabled[selectedModule] !==
-                                                false
-                                            }
-                                            onChange={(event) =>
-                                                toggleModule(
-                                                    selectedModule,
-                                                    event.target.checked
-                                                )
-                                            }
-                                            className="h-5 w-5 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                                        />
-                                    </label>
-                                </div>
-
-                                {!moduleEnabled[selectedModule] && (
-                                    <div className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                        This module is disabled. No regular or
-                                        overdue reminders should be sent for it.
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* REGULAR REMINDER SCHEDULE */}
-                            {moduleEnabled[selectedModule] !== false && (
-                                <div className="rounded-xl border border-slate-200 p-4">
-                                    <div className="flex flex-wrap items-center justify-between gap-3">
-                                        <div>
-                                            <h2 className="text-base font-bold text-slate-900">
-                                                {selectedModule} Reminder Schedule
-                                            </h2>
-
-                                            <p className="mt-1 text-sm text-slate-600">
-                                                Set expiry reminder days and recipients.
-                                            </p>
-                                        </div>
-
-                                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">
-                                            {currentSchedule.length} reminder(s)
-                                        </span>
-                                    </div>
-
-                                    <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                                        <input
-                                            type="number"
-                                            min="0"
-                                            max="365"
-                                            step="1"
-                                            value={newReminderDay}
-                                            onChange={(event) =>
-                                                setNewReminderDay(event.target.value)
-                                            }
-                                            placeholder="Days before expiry (e.g. 15)"
-                                            className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-3 outline-none focus:border-blue-600"
-                                        />
-
-                                        <button
-                                            type="button"
-                                            onClick={addReminderDay}
-                                            className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
-                                        >
-                                            Add Reminder
-                                        </button>
-                                    </div>
-
-                                    <p className="mt-2 text-xs text-slate-500">
-                                        0 = expiry date itself. Add reminder days from 0 to 365 days before expiry.
-                                    </p>
-
-                                    {currentSchedule.length === 0 ? (
-                                        <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
-                                            No reminder days configured for this module. Add a reminder day above.
-                                        </div>
-                                    ) : (
-                                        <div className="mt-5 space-y-4">
-                                            {currentSchedule.map((entry) => (
-                                                <div
-                                                    key={entry.daysBefore}
-                                                    className="rounded-xl border border-slate-200 p-4"
-                                                >
-                                                    <div className="flex flex-wrap items-center justify-between gap-3">
-                                                        <div>
-                                                            <h3 className="font-bold text-slate-900">
-                                                                {entry.daysBefore === 0
-                                                                    ? "Expiry Day (0)"
-                                                                    : `${entry.daysBefore} Days Before`}
-                                                            </h3>
-
-                                                            <p className="mt-1 text-xs text-slate-500">
-                                                                {entry.recipients?.length || 0} user(s) selected
-                                                            </p>
-                                                        </div>
-
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                removeReminderDay(
-                                                                    selectedModule,
-                                                                    entry.daysBefore
-                                                                )
-                                                            }
-                                                            className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
-                                                        >
-                                                            Remove Day
-                                                        </button>
-                                                    </div>
-
-                                                    {users.length === 0 ? (
-                                                        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                                            No active users with valid email addresses available.
-                                                        </p>
-                                                    ) : (
-                                                        <div className="mt-4">
-                                                            <p className="mb-2 text-sm font-semibold text-slate-700">
-                                                                Select Recipients
-                                                            </p>
-
-                                                            <div className="grid gap-2 sm:grid-cols-2">
-                                                                {users.map((user) => (
-                                                                    <UserCheckbox
-                                                                        key={user.uid}
-                                                                        user={user}
-                                                                        checked={(entry.recipients || []).includes(
-                                                                            user.uid
-                                                                        )}
-                                                                        onChange={(checked) =>
-                                                                            toggleRecipient(
-                                                                                selectedModule,
-                                                                                entry.daysBefore,
-                                                                                user.uid,
-                                                                                checked
-                                                                            )
-                                                                        }
-                                                                    />
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    )}
-
-                                                    {(!entry.recipients ||
-                                                        entry.recipients.length === 0) && (
-                                                            <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
-                                                                No recipients selected for this reminder day.
-                                                            </p>
-                                                        )}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {/* OVERDUE SETTINGS */}
-                            <div className="rounded-xl border border-slate-200 p-4">
-                                <div className="flex flex-wrap items-center justify-between gap-4">
-                                    <div>
-                                        <h2 className="text-base font-bold text-slate-900">
-                                            Overdue Reminder Settings
-                                        </h2>
-
-                                        <p className="mt-1 text-sm text-slate-600">
-                                            Configure reminders after the expiry
-                                            date has already passed.
-                                        </p>
-                                    </div>
-
-                                    <label className="flex cursor-pointer items-center gap-3 rounded-lg bg-slate-50 px-4 py-3">
-                                        <span className="text-sm font-semibold text-slate-700">
-                                            {currentOverdue.enabled
-                                                ? "Overdue ON"
-                                                : "Overdue OFF"}
-                                        </span>
-
-                                        <input
-                                            type="checkbox"
-                                            checked={currentOverdue.enabled}
-                                            onChange={(event) =>
-                                                updateOverdue(
-                                                    selectedModule,
-                                                    "enabled",
-                                                    event.target.checked
-                                                )
-                                            }
-                                            className="h-5 w-5 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                                        />
-                                    </label>
-                                </div>
-
-                                {currentOverdue.enabled && (
-                                    <>
-                                        <div className="mt-4">
-                                            <label className="block text-sm font-semibold text-slate-700">
-                                                Send Overdue Reminders Every
-                                            </label>
-
-                                            <select
-                                                value={
-                                                    currentOverdue.frequencyDays
-                                                }
-                                                onChange={(event) =>
-                                                    updateOverdue(
-                                                        selectedModule,
-                                                        "frequencyDays",
-                                                        Number(
-                                                            event.target.value
-                                                        )
-                                                    )
-                                                }
-                                                className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
-                                            >
-                                                {FREQUENCY_OPTIONS.map(
-                                                    (days) => (
-                                                        <option
-                                                            key={days}
-                                                            value={days}
-                                                        >
-                                                            {frequencyLabel(
-                                                                days
-                                                            )}
-                                                        </option>
-                                                    )
-                                                )}
-                                            </select>
-
-                                            <p className="mt-2 text-xs text-slate-500">
-                                                Example: 2 days = alternate
-                                                days; 3 days = once every 3
-                                                days; 7 days = weekly.
-                                            </p>
-                                        </div>
-
-                                        <div className="mt-5">
-                                            <p className="mb-2 text-sm font-semibold text-slate-700">
-                                                Overdue Recipients
-                                            </p>
-
-                                            <p className="mb-3 text-xs text-slate-500">
-                                                These recipients are separate
-                                                from the normal expiry reminder
-                                                recipients.
-                                            </p>
-
-                                            {users.length === 0 ? (
-                                                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                                    No active users with valid
-                                                    email addresses available.
-                                                </p>
-                                            ) : (
-                                                <div className="grid gap-2 sm:grid-cols-2">
-                                                    {users.map((user) => (
-                                                        <UserCheckbox
-                                                            key={user.uid}
-                                                            user={user}
-                                                            checked={(
-                                                                currentOverdue
-                                                                    .recipients ||
-                                                                []
-                                                            ).includes(
-                                                                user.uid
-                                                            )}
-                                                            onChange={(
-                                                                checked
-                                                            ) =>
-                                                                toggleOverdueRecipient(
-                                                                    selectedModule,
-                                                                    user.uid,
-                                                                    checked
-                                                                )
-                                                            }
-                                                        />
-                                                    ))}
-                                                </div>
-                                            )}
-
-                                            {currentOverdue.recipients
-                                                ?.length === 0 && (
-                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
-                                                        No overdue recipients
-                                                        selected. Overdue emails
-                                                        will not have a recipient
-                                                        until users are selected.
-                                                    </p>
-                                                )}
-                                        </div>
-                                    </>
-                                )}
-
-                                {!currentOverdue.enabled && (
-                                    <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
-                                        Overdue emails are disabled for{" "}
-                                        <strong>{selectedModule}</strong>.
-                                        Expired records will not receive
-                                        overdue reminders when this is OFF.
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* SUMMARY */}
-                            <div className="rounded-xl border border-slate-200 p-4">
-                                <h2 className="text-base font-bold text-slate-900">
-                                    Configuration Summary
-                                </h2>
-
-                                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Total Modules
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {MODULES.length}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Modules Enabled
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {enabledModulesCount}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Active Users Available
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {users.length}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Regular Assignments
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {totalAssignments}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Overdue Enabled Modules
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {overdueEnabledCount}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-lg bg-slate-50 p-3">
-                                        <p className="text-xs text-slate-500">
-                                            Overdue Assignments
-                                        </p>
-                                        <p className="mt-1 text-xl font-bold text-slate-900">
-                                            {totalOverdueAssignments}
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* STAGE NOTICE */}
-                            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-                                <p className="font-bold">
-                                    Settings Preview / Configuration
-                                </p>
-
-                                <p className="mt-1">
-                                    These settings are saved in Firestore.
-                                    Regular frequency, module enable/disable,
-                                    overdue frequency and overdue recipients
-                                    will take effect after the email sender
-                                    function is updated to read these settings.
-                                    Until then, the existing sender behavior
-                                    remains unchanged.
-                                </p>
-                            </div>
-
-                            {error && (
-                                <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                                    {error}
-                                </p>
-                            )}
-
-                            {success && (
-                                <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
-                                    {success}
-                                </p>
-                            )}
-
-                            {/* ACTIONS */}
-                            <div className="flex flex-wrap gap-3">
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        router.push("/dashboard/users")
-                                    }
-                                    disabled={saving}
-                                    className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                >
-                                    Cancel
-                                </button>
-
-                                <button
-                                    type="submit"
-                                    disabled={saving}
-                                    className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
-                                >
-                                    {saving
-                                        ? "Saving…"
-                                        : "Save Reminder Settings"}
-                                </button>
-                            </div>
-                        </form>
-                    )}
-                </section>
-            </div>
-        </main>
+    console.log(
+        `Finished. Regular records: ${regularRecords.length}; overdue records: ${overdueRecords.length}; recipients: ${recipientMap.size}; emails accepted: ${sentCount}.`
     );
 }
+main().catch((error) => {
+    console.error(
+        "Expiry reminder job failed:",
+        error
+    );
+
+    process.exitCode = 1;
+});
+
+
+
+
