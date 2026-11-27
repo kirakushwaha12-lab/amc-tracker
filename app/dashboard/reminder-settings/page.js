@@ -480,7 +480,7 @@ export default function ReminderSettingsPage() {
 
             return {
                 ...current,
-              [moduleName]: existing.map((entry) => {
+                [moduleName]: existing.map((entry) => {
                     if (entry.daysBefore !== daysBefore) return entry;
 
                     const selected = new Set(entry.recipients || []);
@@ -841,10 +841,10 @@ export default function ReminderSettingsPage() {
 
                                                     {(!entry.recipients ||
                                                         entry.recipients.length === 0) && (
-                                                        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
-                                                            No recipients selected for this reminder day.
-                                                        </p>
-                                                    )}
+                                                            <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                                                                No recipients selected for this reminder day.
+                                                            </p>
+                                                        )}
                                                 </div>
                                             ))}
                                         </div>
@@ -967,10 +967,10 @@ export default function ReminderSettingsPage() {
                                                 currentModuleSettings.overdueRecipients ||
                                                 []
                                             ).length === 0 && (
-                                                <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
-                                                    No overdue recipients selected.
-                                                </p>
-                                            )}
+                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                                                        No overdue recipients selected.
+                                                    </p>
+                                                )}
                                         </div>
                                     </>
                                 )}
@@ -1032,17 +1032,23 @@ export default function ReminderSettingsPage() {
                             </div>
 
                             {/* Notice */}
-                            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                            <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
                                 <p className="font-bold">
                                     Settings Configuration
                                 </p>
 
                                 <p className="mt-1">
-                                    Settings are saved in Firestore. The email sender
-                                    must read these settings for module status,
-                                    regular reminder frequency, overdue reminder
-                                    frequency, schedules and recipients to control
-                                    actual email delivery.
+                                    Reminder settings are saved in Firestore and used by the
+                                    automated email sender. Module status, expiry schedules,
+                                    recipients, regular reminder frequency, overdue frequency,
+                                    and overdue recipients are controlled by the settings
+                                    configured above.
+                                </p>
+
+                                <p className="mt-2">
+                                    Email delivery also depends on the configured sender account,
+                                    valid recipient email addresses, and the automated reminder
+                                    workflow.
                                 </p>
                             </div>
 
