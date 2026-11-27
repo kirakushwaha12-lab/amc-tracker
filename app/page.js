@@ -42,7 +42,7 @@ export default function Home() {
 
       setError(
         messages[err.code] ||
-          "Unable to sign in. Please try again."
+        "Unable to sign in. Please try again."
       );
     } finally {
       setLoading(false);
@@ -83,19 +83,18 @@ export default function Home() {
             </div>
 
             <h1 className="max-w-md text-4xl font-semibold leading-tight tracking-tight xl:text-5xl">
-              Stay ahead of every expiry.
+              Track. Manage. Stay Ahead.
             </h1>
 
             <p className="mt-5 max-w-md text-base leading-7 text-slate-300">
-              Manage AMC contracts, warranties, vehicle documents,
-              software licenses and compliance records in one place.
+              Manage company assets, maintenance, renewals and compliance records through one centralized platform.
             </p>
 
             <div className="mt-9 space-y-4">
               {[
-                "Contract and expiry tracking",
-                "Upcoming renewal reminders",
-                "Centralized records and documents",
+                "Asset & Record Tracking",
+                "Timely Renewal Notifications",
+                "Centralized Document Management",
               ].map((item) => (
                 <div key={item} className="flex items-center gap-3">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-400/15 text-sm text-emerald-300">
@@ -134,7 +133,7 @@ export default function Home() {
 
             <div className="mb-8">
               <p className="text-sm font-semibold text-blue-700">
-                WELCOME BACK
+                WELCOME TO AIL TRACKER
               </p>
 
               <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
@@ -142,8 +141,7 @@ export default function Home() {
               </h2>
 
               <p className="mt-3 text-sm leading-6 text-slate-500">
-                Enter your company-authorized credentials to
-                access the tracking system.
+                Sign in using your authorized company account to access AIL Tracker.
               </p>
             </div>
 
@@ -231,7 +229,7 @@ export default function Home() {
             </div>
 
             <p className="mt-8 text-center text-xs text-slate-400">
-              AMC · Warranty · Insurance · Pollution · Compliance · Software License
+              IT Assets · Machinery · Vehicles · Maintenance · Compliance · Renewals
             </p>
           </div>
         </section>

@@ -830,9 +830,7 @@ export default function PollutionPage() {
 
         if (
             !form.vehicleNo.trim() ||
-            !form.certificateNo.trim() ||
-            !form.certificateDate ||
-            !form.expiryDate
+            !form.certificateNo.trim()
         ) {
             setFormError(
                 "Please enter Vehicle No., Certificate No., Certificate Date and Expiry Date."
@@ -840,7 +838,11 @@ export default function PollutionPage() {
             return;
         }
 
-        if (form.expiryDate < form.certificateDate) {
+        if (
+            form.certificateDate &&
+            form.expiryDate &&
+            form.expiryDate < form.certificateDate
+        ) {
             setFormError(
                 "Expiry Date cannot be before Certificate Date."
             );
@@ -1064,8 +1066,8 @@ export default function PollutionPage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-2">
+                        {canEditRecords && (
                             <button
                                 type="button"
                                 onClick={openAddForm}
@@ -1074,17 +1076,17 @@ export default function PollutionPage() {
                             >
                                 + Add Pollution Record
                             </button>
+                        )}
 
-                            <button
-                                type="button"
-                                onClick={() => setShowRenewalHistory(true)}
-                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        </div>
-                    )}
+                        <button
+                            type="button"
+                            onClick={() => setShowRenewalHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
+                    </div>
                 </div>
 
                 {notice && (
@@ -1478,9 +1480,9 @@ export default function PollutionPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Certificate Date *
+                                Certificate Date
                                 <input
-                                    required
+
                                     type="date"
                                     name="certificateDate"
                                     data-ocr-aliases="Certificate Date|Test Date|Inspection Date|Date of Test|Testing Date|Issue Date"
@@ -1491,9 +1493,9 @@ export default function PollutionPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Expiry Date *
+                                Expiry Date
                                 <input
-                                    required
+
                                     type="date"
                                     min={form.certificateDate || undefined}
                                     name="expiryDate"
@@ -1530,8 +1532,6 @@ export default function PollutionPage() {
                                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal"
                                 />
                             </label>
-
-
 
                             <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 sm:col-span-2">
                                 <label className="block text-sm font-semibold text-slate-800">

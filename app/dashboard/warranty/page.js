@@ -861,20 +861,12 @@ export default function WarrantyPage() {
             setNotice("Please enter the vendor name.");
             return;
         }
-        if (!form.purchaseDate || !form.endDate) {
-            setNotice("Please enter both Purchase Date and Expiry Date.");
-            return;
-        }
-
-        if (form.endDate < form.purchaseDate) {
+        if (
+            form.purchaseDate &&
+            form.endDate &&
+            form.endDate < form.purchaseDate
+        ) {
             setNotice("Expiry Date cannot be before Purchase Date.");
-            return;
-        }
-
-        if (form.warrantyClaim === "Y" && !form.claimedDate) {
-            setNotice(
-                "Please enter the Claimed Date when Warranty Claim is Yes."
-            );
             return;
         }
 
@@ -1054,8 +1046,8 @@ export default function WarrantyPage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                        {canEditRecords && (
                             <button
                                 type="button"
                                 onClick={openModal}
@@ -1064,17 +1056,17 @@ export default function WarrantyPage() {
                             >
                                 + Add Warranty Record
                             </button>
+                        )}
 
-                            <button
-                                type="button"
-                                onClick={() => setShowHistory(true)}
-                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        </div>
-                    )}
+                        <button
+                            type="button"
+                            onClick={() => setShowHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
+                    </div>
                 </div>
 
                 {notice && !showModal && (
@@ -1218,7 +1210,14 @@ export default function WarrantyPage() {
                     </div>
 
                     <div className="overflow-x-auto">
-                        <table className="w-full min-w-[2100px] text-left text-sm">
+                        <table
+                            className={`w-full ${filteredRecords.some(
+                                (record) => record.warrantyClaim === "Y"
+                            )
+                                ? "min-w-[2100px]"
+                                : "min-w-[1700px]"
+                                } text-left text-sm`}
+                        >
                             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                     {[
@@ -1233,8 +1232,13 @@ export default function WarrantyPage() {
                                         "Expiry Date",
                                         "Vendor",
                                         "Warranty Claim",
-                                        "Claimed Date",
-                                        "Reason for Issues",
+
+                                        ...(filteredRecords.some(
+                                            (record) => record.warrantyClaim === "Y"
+                                        )
+                                            ? ["Claimed Date", "Reason for Issues"]
+                                            : []),
+
                                         "Remarks",
                                         "Status",
                                         "Actions",
@@ -1252,13 +1256,25 @@ export default function WarrantyPage() {
                             <tbody className="divide-y divide-slate-100">
                                 {loadingData ? (
                                     <tr>
-                                        <td colSpan={16} className="px-4 py-12 text-center text-slate-500">
+                                        <td colSpan={
+                                            filteredRecords.some(
+                                                (record) => record.warrantyClaim === "Y"
+                                            )
+                                                ? 16
+                                                : 14
+                                        } className="px-4 py-12 text-center text-slate-500">
                                             Loading warranty records...
                                         </td>
                                     </tr>
                                 ) : filteredRecords.length === 0 ? (
                                     <tr>
-                                        <td colSpan={16} className="px-4 py-12 text-center">
+                                        <td colSpan={
+                                            filteredRecords.some(
+                                                (record) => record.warrantyClaim === "Y"
+                                            )
+                                                ? 16
+                                                : 14
+                                        } className="px-4 py-12 text-center">
                                             <p className="font-medium text-slate-700">
                                                 No warranty records found
                                             </p>
@@ -1315,12 +1331,23 @@ export default function WarrantyPage() {
                                                         ? "No"
                                                         : record.warrantyClaim}
                                             </td>
-                                            <td className="whitespace-nowrap px-4 py-4 text-slate-700">
-                                                {formatDate(record.claimedDate)}
-                                            </td>
-                                            <td className="max-w-[220px] whitespace-normal px-4 py-4 text-slate-700">
-                                                {record.reasonForIssues || "—"}
-                                            </td>
+                                            {filteredRecords.some(
+                                                (item) => item.warrantyClaim === "Y"
+                                            ) && (
+                                                    <>
+                                                        <td className="whitespace-nowrap px-4 py-4 text-slate-700">
+                                                            {record.warrantyClaim === "Y"
+                                                                ? formatDate(record.claimedDate)
+                                                                : "—"}
+                                                        </td>
+
+                                                        <td className="max-w-[220px] whitespace-normal px-4 py-4 text-slate-700">
+                                                            {record.warrantyClaim === "Y"
+                                                                ? record.reasonForIssues || "—"
+                                                                : "—"}
+                                                        </td>
+                                                    </>
+                                                )}
                                             <td className="max-w-[220px] whitespace-normal px-4 py-4 text-slate-700">
                                                 {record.remarks || "—"}
                                             </td>
@@ -1552,9 +1579,9 @@ export default function WarrantyPage() {
                                 </div>
 
                                 <label className="text-sm font-medium text-slate-700">
-                                    Purchase Date *
+                                    Purchase Date
                                     <input
-                                        required
+
                                         type="date"
                                         name="purchaseDate"
                                         data-ocr-aliases="Purchase Date|Date of Purchase|Invoice Date"
@@ -1565,9 +1592,9 @@ export default function WarrantyPage() {
                                 </label>
 
                                 <label className="text-sm font-medium text-slate-700">
-                                    Expiry Date *
+                                    Expiry Date
                                     <input
-                                        required
+
                                         type="date"
                                         min={form.purchaseDate || undefined}
                                         name="endDate"
@@ -1608,9 +1635,9 @@ export default function WarrantyPage() {
                                 {form.warrantyClaim === "Y" && (
                                     <>
                                         <label className="text-sm font-medium text-slate-700">
-                                            Claimed Date *
+                                            Claimed Date
                                             <input
-                                                required
+
                                                 type="date"
                                                 min={form.purchaseDate || undefined}
                                                 max={form.endDate || undefined}

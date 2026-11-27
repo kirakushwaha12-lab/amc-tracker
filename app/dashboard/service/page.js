@@ -564,18 +564,16 @@ export default function ServicePage() {
             return;
         }
 
-        if (
-            !form.vehicleNo.trim() ||
-            !form.lastServiceDate ||
-            !form.nextServiceDueDate
-        ) {
-            setFormError(
-                "Please enter Vehicle No., Last Service Date and Next Due Date."
-            );
+        if (!form.vehicleNo.trim()) {
+            setFormError("Please enter Vehicle No.");
             return;
         }
 
-        if (form.nextServiceDueDate < form.lastServiceDate) {
+        if (
+            form.lastServiceDate &&
+            form.nextServiceDueDate &&
+            form.nextServiceDueDate < form.lastServiceDate
+        ) {
             setFormError(
                 "Next Due Date cannot be before Last Service Date."
             );
@@ -819,26 +817,24 @@ export default function ServicePage() {
 
                     <div className="flex flex-wrap items-center gap-2">
                         {canEditRecords && (
-                            <>
-                                <button
-                                    type="button"
-                                    onClick={openAddForm}
-                                    className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                    style={{ backgroundColor: BLUE }}
-                                >
-                                    + Add Service Record
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={() => setShowRenewalHistory(true)}
-                                    className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                    style={{ backgroundColor: BLUE }}
-                                >
-                                    Renewal History
-                                </button>
-                            </>
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Service Record
+                            </button>
                         )}
+
+                        <button
+                            type="button"
+                            onClick={() => setShowRenewalHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
                     </div>
                 </div>
 
@@ -1177,9 +1173,9 @@ export default function ServicePage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Last Service Date *
+                                Last Service Date
                                 <input
-                                    required
+
                                     type="date"
                                     name="lastServiceDate"
                                     value={form.lastServiceDate}
@@ -1189,9 +1185,9 @@ export default function ServicePage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Next Due Date *
+                                Next Due Date
                                 <input
-                                    required
+
                                     type="date"
                                     min={form.lastServiceDate || undefined}
                                     name="nextServiceDueDate"

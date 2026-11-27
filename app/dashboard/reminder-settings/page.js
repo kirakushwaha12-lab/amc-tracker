@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -17,6 +16,9 @@ import { auth, db } from "../../../lib/firebase";
 const SETTINGS_REF = doc(db, "app_settings", "expiryReminders");
 const DEFAULT_DAYS = [10, 3, 1, 0];
 const DEFAULT_EMAIL_TIME = "09:30";
+const DEFAULT_REGULAR_FREQUENCY = 2;
+
+const FREQUENCY_OPTIONS = [1, 2, 3, 4, 5, 7, 10, 15, 30];
 
 const MODULES = [
     "AMC",
@@ -45,6 +47,14 @@ function formatTimeLabel(value) {
     const displayHour = hours % 12 || 12;
 
     return `${String(displayHour).padStart(2, "0")}:${String(minutes).padStart(2, "0")} ${suffix}`;
+}
+
+function frequencyLabel(days) {
+    return days === 1
+        ? "Every Day (Daily)"
+        : days === 2
+            ? "Every 2 Days (Alternate Days)"
+            : `Every ${days} Days`;
 }
 
 function normalizeRole(value) {
@@ -80,10 +90,54 @@ function cleanEmailTime(value) {
         : DEFAULT_EMAIL_TIME;
 }
 
+function cleanFrequency(value, fallback = 2) {
+    const number = Number(value);
+    return FREQUENCY_OPTIONS.includes(number) ? number : fallback;
+}
+
 function createEmptySchedules() {
     return Object.fromEntries(
         MODULES.map((moduleName) => [moduleName, []])
     );
+}
+
+function createDefaultModuleSettings() {
+    return Object.fromEntries(
+        MODULES.map((moduleName) => [
+            moduleName,
+            {
+                enabled: true,
+                overdueEnabled: false,
+                overdueIntervalDays: 2,
+                overdueRecipients: [],
+            },
+        ])
+    );
+}
+
+function normalizeModuleSettings(rawSettings, validUids) {
+    const defaults = createDefaultModuleSettings();
+
+    for (const moduleName of MODULES) {
+        const raw = rawSettings?.[moduleName];
+
+        if (!raw || typeof raw !== "object") continue;
+
+        defaults[moduleName] = {
+            enabled: raw.enabled !== false,
+            overdueEnabled: raw.overdueEnabled === true,
+            overdueIntervalDays: cleanFrequency(
+                raw.overdueIntervalDays,
+                2
+            ),
+            overdueRecipients: Array.isArray(raw.overdueRecipients)
+                ? [...new Set(raw.overdueRecipients.map(String))]
+                    .filter((uid) => validUids.has(uid))
+                : [],
+        };
+    }
+
+    return defaults;
 }
 
 function normalizeScheduleEntries(entries, validUids) {
@@ -126,12 +180,11 @@ function normalizeScheduleEntries(entries, validUids) {
 
 function createLegacySchedules(settings, validUids) {
     const schedules = createEmptySchedules();
-
     const legacyDays = cleanReminderDays(settings.reminderDays);
 
     const legacyOperators =
         settings.moduleOperators &&
-        typeof settings.moduleOperators === "object"
+            typeof settings.moduleOperators === "object"
             ? settings.moduleOperators
             : {};
 
@@ -158,10 +211,16 @@ export default function ReminderSettingsPage() {
     const [allowed, setAllowed] = useState(false);
 
     const [emailTime, setEmailTime] = useState(DEFAULT_EMAIL_TIME);
-    const [users, setUsers] = useState([]);
+    const [regularFrequencyDays, setRegularFrequencyDays] = useState(
+        DEFAULT_REGULAR_FREQUENCY
+    );
 
+    const [users, setUsers] = useState([]);
     const [moduleSchedules, setModuleSchedules] = useState(
         createEmptySchedules()
+    );
+    const [moduleSettings, setModuleSettings] = useState(
+        createDefaultModuleSettings()
     );
 
     const [selectedModule, setSelectedModule] = useState("AMC");
@@ -219,7 +278,6 @@ export default function ReminderSettingsPage() {
                     ? settingsSnapshot.data()
                     : {};
 
-                // All active users with valid email addresses can be selected.
                 const activeUsers = usersSnapshot.docs
                     .map((item) => {
                         const data = item.data();
@@ -252,7 +310,6 @@ export default function ReminderSettingsPage() {
 
                 let loadedSchedules;
 
-                // Prefer the new module-wise schedule configuration.
                 if (
                     settings.moduleSchedules &&
                     typeof settings.moduleSchedules === "object"
@@ -267,8 +324,6 @@ export default function ReminderSettingsPage() {
                             );
                     }
                 } else {
-                    // Migrate old global reminderDays/moduleOperators
-                    // into the new page's initial schedule.
                     loadedSchedules = createLegacySchedules(
                         settings,
                         validUids
@@ -277,7 +332,23 @@ export default function ReminderSettingsPage() {
 
                 setUsers(activeUsers);
                 setModuleSchedules(loadedSchedules);
+
+                setModuleSettings(
+                    normalizeModuleSettings(
+                        settings.moduleSettings,
+                        validUids
+                    )
+                );
+
                 setEmailTime(cleanEmailTime(settings.emailTime));
+
+                setRegularFrequencyDays(
+                    cleanFrequency(
+                        settings.regularFrequencyDays,
+                        DEFAULT_REGULAR_FREQUENCY
+                    )
+                );
+
                 setLoading(false);
             } catch (err) {
                 console.error("Reminder settings load error:", err);
@@ -299,6 +370,10 @@ export default function ReminderSettingsPage() {
 
     const currentSchedule = moduleSchedules[selectedModule] || [];
 
+    const currentModuleSettings =
+        moduleSettings[selectedModule] ||
+        createDefaultModuleSettings()[selectedModule];
+
     const totalAssignments = useMemo(() => {
         return MODULES.reduce((total, moduleName) => {
             const entries = moduleSchedules[moduleName] || [];
@@ -314,6 +389,41 @@ export default function ReminderSettingsPage() {
         }, 0);
     }, [moduleSchedules]);
 
+    const totalOverdueAssignments = useMemo(() => {
+        return MODULES.reduce((total, moduleName) => {
+            const settings = moduleSettings[moduleName];
+            return total + (settings?.overdueRecipients?.length || 0);
+        }, 0);
+    }, [moduleSettings]);
+
+    function updateCurrentModuleSettings(updates) {
+        setModuleSettings((current) => ({
+            ...current,
+            [selectedModule]: {
+                ...current[selectedModule],
+                ...updates,
+            },
+        }));
+    }
+
+    function toggleOverdueRecipient(uid, checked) {
+        setModuleSettings((current) => {
+            const existing = current[selectedModule] || {};
+            const selected = new Set(existing.overdueRecipients || []);
+
+            if (checked) selected.add(uid);
+            else selected.delete(uid);
+
+            return {
+                ...current,
+                [selectedModule]: {
+                    ...existing,
+                    overdueRecipients: [...selected],
+                },
+            };
+        });
+    }
+
     function addReminderDay() {
         setError("");
         setSuccess("");
@@ -327,11 +437,7 @@ export default function ReminderSettingsPage() {
 
         const day = Number(value);
 
-        if (
-            !Number.isInteger(day) ||
-            day < 0 ||
-            day > 365
-        ) {
+        if (!Number.isInteger(day) || day < 0 || day > 365) {
             setError("Reminder days must be a whole number between 0 and 365.");
             return;
         }
@@ -374,18 +480,13 @@ export default function ReminderSettingsPage() {
 
             return {
                 ...current,
-                [moduleName]: existing.map((entry) => {
-                    if (entry.daysBefore !== daysBefore) {
-                        return entry;
-                    }
+              [moduleName]: existing.map((entry) => {
+                    if (entry.daysBefore !== daysBefore) return entry;
 
                     const selected = new Set(entry.recipients || []);
 
-                    if (checked) {
-                        selected.add(uid);
-                    } else {
-                        selected.delete(uid);
-                    }
+                    if (checked) selected.add(uid);
+                    else selected.delete(uid);
 
                     return {
                         ...entry,
@@ -407,6 +508,11 @@ export default function ReminderSettingsPage() {
             return;
         }
 
+        if (!FREQUENCY_OPTIONS.includes(Number(regularFrequencyDays))) {
+            setError("Please select a valid regular reminder frequency.");
+            return;
+        }
+
         const validUids = new Set(users.map((user) => user.uid));
         const safeSchedules = createEmptySchedules();
 
@@ -417,6 +523,11 @@ export default function ReminderSettingsPage() {
             );
         }
 
+        const safeModuleSettings = normalizeModuleSettings(
+            moduleSettings,
+            validUids
+        );
+
         try {
             setSaving(true);
 
@@ -424,7 +535,9 @@ export default function ReminderSettingsPage() {
                 SETTINGS_REF,
                 {
                     moduleSchedules: safeSchedules,
+                    moduleSettings: safeModuleSettings,
                     emailTime,
+                    regularFrequencyDays: Number(regularFrequencyDays),
                     timeZone: "Asia/Kolkata",
                     updatedAt: serverTimestamp(),
                     updatedBy: auth.currentUser?.uid || "",
@@ -433,6 +546,7 @@ export default function ReminderSettingsPage() {
             );
 
             setModuleSchedules(safeSchedules);
+            setModuleSettings(safeModuleSettings);
             setSuccess("Reminder settings saved successfully.");
         } catch (err) {
             console.error("Reminder settings save error:", err);
@@ -470,7 +584,72 @@ export default function ReminderSettingsPage() {
                             onSubmit={handleSave}
                             className="mt-6 space-y-7"
                         >
-                            {/* Module selection */}
+                            {/* Global Email Settings */}
+                            <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+                                <h2 className="text-lg font-bold text-slate-900">
+                                    Global Email Settings
+                                </h2>
+
+                                <p className="mt-1 text-sm text-slate-600">
+                                    These settings apply to the reminder email system.
+                                </p>
+
+                                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                                    <label className="block">
+                                        <span className="text-sm font-semibold text-slate-700">
+                                            Email Sending Time
+                                        </span>
+
+                                        <select
+                                            value={emailTime}
+                                            onChange={(event) =>
+                                                setEmailTime(event.target.value)
+                                            }
+                                            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
+                                        >
+                                            {EMAIL_TIME_OPTIONS.map((time) => (
+                                                <option key={time} value={time}>
+                                                    {formatTimeLabel(time)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+
+                                    <label className="block">
+                                        <span className="text-sm font-semibold text-slate-700">
+                                            Regular Reminder Frequency
+                                        </span>
+
+                                        <select
+                                            value={regularFrequencyDays}
+                                            onChange={(event) =>
+                                                setRegularFrequencyDays(
+                                                    Number(event.target.value)
+                                                )
+                                            }
+                                            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
+                                        >
+                                            {FREQUENCY_OPTIONS.map((days) => (
+                                                <option key={days} value={days}>
+                                                    {frequencyLabel(days)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                </div>
+
+                                <div className="mt-3 rounded-lg bg-white p-3 text-sm text-blue-900">
+                                    <strong>Time Zone:</strong> India Standard Time (Asia/Kolkata)
+                                    <br />
+                                    <strong>Selected Time:</strong>{" "}
+                                    {formatTimeLabel(emailTime)} IST
+                                    <br />
+                                    <strong>Regular Frequency:</strong>{" "}
+                                    {frequencyLabel(Number(regularFrequencyDays))}
+                                </div>
+                            </div>
+
+                            {/* Module Selection */}
                             <div>
                                 <h2 className="text-base font-bold text-slate-900">
                                     Select Module
@@ -487,221 +666,334 @@ export default function ReminderSettingsPage() {
                                     className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base outline-none focus:border-blue-600"
                                 >
                                     {MODULES.map((moduleName) => (
-                                        <option
-                                            key={moduleName}
-                                            value={moduleName}
-                                        >
+                                        <option key={moduleName} value={moduleName}>
                                             {moduleName}
                                         </option>
                                     ))}
                                 </select>
                             </div>
 
-                            {/* Reminder schedule */}
+                            {/* Module Master ON/OFF */}
                             <div className="rounded-xl border border-slate-200 p-4">
-                                <div className="flex flex-wrap items-center justify-between gap-3">
-                                    <div>
-                                        <h2 className="text-base font-bold text-slate-900">
-                                            {selectedModule} Reminder Schedule
-                                        </h2>
+                                <h2 className="text-base font-bold text-slate-900">
+                                    {selectedModule} Module Status
+                                </h2>
 
-                                        <p className="mt-1 text-sm text-slate-600">
-                                            Set reminder days and select
-                                            recipients for each reminder.
-                                        </p>
-                                    </div>
-
-                                    <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">
-                                        {currentSchedule.length} reminder(s)
-                                    </span>
-                                </div>
-
-                                {/* Add reminder day */}
-                                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                                <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3">
                                     <input
-                                        type="number"
-                                        min="0"
-                                        max="365"
-                                        step="1"
-                                        value={newReminderDay}
+                                        type="checkbox"
+                                        checked={currentModuleSettings.enabled}
                                         onChange={(event) =>
-                                            setNewReminderDay(event.target.value)
+                                            updateCurrentModuleSettings({
+                                                enabled: event.target.checked,
+                                            })
                                         }
-                                        placeholder="Days before expiry (e.g. 15)"
-                                        className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-3 outline-none focus:border-blue-600"
+                                        className="mt-1 h-4 w-4"
                                     />
 
-                                    <button
-                                        type="button"
-                                        onClick={addReminderDay}
-                                        className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
-                                    >
-                                        + Add Reminder
-                                    </button>
-                                </div>
+                                    <span>
+                                        <span className="block font-semibold text-slate-800">
+                                            Enable Module Reminders
+                                        </span>
 
-                                <p className="mt-2 text-xs text-slate-500">
-                                    0 = expiry date itself. You can add
-                                    reminders from 0 to 365 days before expiry.
+                                        <span className="block text-sm text-slate-500">
+                                            OFF pauses all regular and overdue email reminders for this module.
+                                            Existing schedule and recipients will be preserved.
+                                        </span>
+                                    </span>
+                                </label>
+                            </div>
+
+                            {/* Regular Schedule - HIDDEN WHEN MODULE OFF */}
+                            {currentModuleSettings.enabled && (
+                                <div className="rounded-xl border border-slate-200 p-4">
+                                    <div className="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <h2 className="text-base font-bold text-slate-900">
+                                                {selectedModule} Expiry Reminder Schedule
+                                            </h2>
+
+                                            <p className="mt-1 text-sm text-slate-600">
+                                                Set reminder days and recipients for each expiry reminder.
+                                            </p>
+                                        </div>
+
+                                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">
+                                            {currentSchedule.length} reminder(s)
+                                        </span>
+                                    </div>
+
+                                    <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="365"
+                                            step="1"
+                                            value={newReminderDay}
+                                            onChange={(event) =>
+                                                setNewReminderDay(event.target.value)
+                                            }
+                                            placeholder="Days before expiry (e.g. 15)"
+                                            className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-3 outline-none focus:border-blue-600"
+                                        />
+
+                                        <button
+                                            type="button"
+                                            onClick={addReminderDay}
+                                            className="rounded-xl bg-[#0b4da2] px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800"
+                                        >
+                                            Add Reminder
+                                        </button>
+                                    </div>
+
+                                    <p className="mt-2 text-xs text-slate-500">
+                                        0 = expiry date itself. Add reminders from 0 to 365 days before expiry.
+                                    </p>
+
+                                    {currentSchedule.length === 0 ? (
+                                        <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
+                                            No reminder days configured for this module. Add a reminder day above.
+                                        </div>
+                                    ) : (
+                                        <div className="mt-5 space-y-4">
+                                            {currentSchedule.map((entry) => (
+                                                <div
+                                                    key={entry.daysBefore}
+                                                    className="rounded-xl border border-slate-200 p-4"
+                                                >
+                                                    <div className="flex flex-wrap items-center justify-between gap-3">
+                                                        <div>
+                                                            <h3 className="font-bold text-slate-900">
+                                                                {entry.daysBefore === 0
+                                                                    ? "Expiry Day (0)"
+                                                                    : `${entry.daysBefore} Days Before`}
+                                                            </h3>
+
+                                                            <p className="mt-1 text-xs text-slate-500">
+                                                                {entry.recipients?.length || 0} user(s) selected
+                                                            </p>
+                                                        </div>
+
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                removeReminderDay(
+                                                                    selectedModule,
+                                                                    entry.daysBefore
+                                                                )
+                                                            }
+                                                            className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                                                        >
+                                                            Remove Day
+                                                        </button>
+                                                    </div>
+
+                                                    {users.length === 0 ? (
+                                                        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                                                            No active users with valid email addresses available.
+                                                        </p>
+                                                    ) : (
+                                                        <div className="mt-4">
+                                                            <p className="mb-2 text-sm font-semibold text-slate-700">
+                                                                Select Expiry Reminder Recipients
+                                                            </p>
+
+                                                            <div className="grid gap-2 sm:grid-cols-2">
+                                                                {users.map((user) => (
+                                                                    <label
+                                                                        key={user.uid}
+                                                                        className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-100 px-3 py-3 hover:bg-slate-50"
+                                                                    >
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={
+                                                                                (entry.recipients || []).includes(user.uid)
+                                                                            }
+                                                                            onChange={(event) =>
+                                                                                toggleRecipient(
+                                                                                    selectedModule,
+                                                                                    entry.daysBefore,
+                                                                                    user.uid,
+                                                                                    event.target.checked
+                                                                                )
+                                                                            }
+                                                                            className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                                                                        />
+
+                                                                        <span className="min-w-0">
+                                                                            <span className="block text-sm font-medium text-slate-800">
+                                                                                {user.name}
+                                                                            </span>
+
+                                                                            <span className="block break-all text-xs text-slate-500">
+                                                                                {user.email}
+                                                                            </span>
+
+                                                                            <span className="mt-1 inline-block rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                                                                                {user.role}
+                                                                            </span>
+                                                                        </span>
+                                                                    </label>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {(!entry.recipients ||
+                                                        entry.recipients.length === 0) && (
+                                                        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                                                            No recipients selected for this reminder day.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Overdue Settings - REMAINS VISIBLE */}
+                            <div className="rounded-xl border border-orange-200 bg-orange-50/40 p-4">
+                                <h2 className="text-base font-bold text-slate-900">
+                                    {selectedModule} Overdue Reminder Settings
+                                </h2>
+
+                                <p className="mt-1 text-sm text-slate-600">
+                                    Configure reminders after the expiry date has passed.
                                 </p>
 
-                                {/* Schedule entries */}
-                                {currentSchedule.length === 0 ? (
-                                    <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
-                                        No reminder days configured for this
-                                        module. Add a reminder day above.
-                                    </div>
-                                ) : (
-                                    <div className="mt-5 space-y-4">
-                                        {currentSchedule.map((entry) => (
-                                            <div
-                                                key={entry.daysBefore}
-                                                className="rounded-xl border border-slate-200 p-4"
+                                <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-orange-200 bg-white p-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={currentModuleSettings.overdueEnabled}
+                                        onChange={(event) =>
+                                            updateCurrentModuleSettings({
+                                                overdueEnabled: event.target.checked,
+                                            })
+                                        }
+                                        className="mt-1 h-4 w-4"
+                                    />
+
+                                    <span>
+                                        <span className="block font-semibold text-slate-800">
+                                            Enable overdue reminders
+                                        </span>
+
+                                        <span className="block text-sm text-slate-500">
+                                            Send reminder emails after this module's records have expired.
+                                            These emails are paused whenever Module Status is OFF.
+                                        </span>
+                                    </span>
+                                </label>
+
+                                {currentModuleSettings.overdueEnabled && (
+                                    <>
+                                        <label className="mt-4 block">
+                                            <span className="text-sm font-semibold text-slate-700">
+                                                Send overdue email every
+                                            </span>
+
+                                            <select
+                                                value={currentModuleSettings.overdueIntervalDays}
+                                                onChange={(event) =>
+                                                    updateCurrentModuleSettings({
+                                                        overdueIntervalDays: Number(
+                                                            event.target.value
+                                                        ),
+                                                    })
+                                                }
+                                                className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-blue-600"
                                             >
-                                                <div className="flex flex-wrap items-center justify-between gap-3">
-                                                    <div>
-                                                        <h3 className="font-bold text-slate-900">
-                                                            {entry.daysBefore === 0
-                                                                ? "Expiry Day (0)"
-                                                                : `${entry.daysBefore} Days Before`}
-                                                        </h3>
+                                                {FREQUENCY_OPTIONS.map((days) => (
+                                                    <option key={days} value={days}>
+                                                        {frequencyLabel(days)}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </label>
 
-                                                        <p className="mt-1 text-xs text-slate-500">
-                                                            {entry.recipients?.length || 0} user(s) selected
-                                                        </p>
-                                                    </div>
+                                        <div className="mt-4">
+                                            <p className="mb-2 text-sm font-semibold text-slate-700">
+                                                Select Overdue Reminder Recipients
+                                            </p>
 
-                                                    <button
-                                                        type="button"
-                                                        onClick={() =>
-                                                            removeReminderDay(
-                                                                selectedModule,
-                                                                entry.daysBefore
-                                                            )
-                                                        }
-                                                        className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
-                                                    >
-                                                        Remove Day
-                                                    </button>
+                                            {users.length === 0 ? (
+                                                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                                                    No active users with valid email addresses available.
+                                                </p>
+                                            ) : (
+                                                <div className="grid gap-2 sm:grid-cols-2">
+                                                    {users.map((user) => (
+                                                        <label
+                                                            key={user.uid}
+                                                            className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3 hover:bg-slate-50"
+                                                        >
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={
+                                                                    (
+                                                                        currentModuleSettings.overdueRecipients ||
+                                                                        []
+                                                                    ).includes(user.uid)
+                                                                }
+                                                                onChange={(event) =>
+                                                                    toggleOverdueRecipient(
+                                                                        user.uid,
+                                                                        event.target.checked
+                                                                    )
+                                                                }
+                                                                className="mt-1 h-4 w-4"
+                                                            />
+
+                                                            <span className="min-w-0">
+                                                                <span className="block text-sm font-medium text-slate-800">
+                                                                    {user.name}
+                                                                </span>
+
+                                                                <span className="block break-all text-xs text-slate-500">
+                                                                    {user.email}
+                                                                </span>
+
+                                                                <span className="mt-1 inline-block rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                                                                    {user.role}
+                                                                </span>
+                                                            </span>
+                                                        </label>
+                                                    ))}
                                                 </div>
+                                            )}
 
-                                                {users.length === 0 ? (
-                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                                                        No active users with
-                                                        valid email addresses
-                                                        available.
-                                                    </p>
-                                                ) : (
-                                                    <div className="mt-4">
-                                                        <p className="mb-2 text-sm font-semibold text-slate-700">
-                                                            Select Recipients
-                                                        </p>
+                                            {(
+                                                currentModuleSettings.overdueRecipients ||
+                                                []
+                                            ).length === 0 && (
+                                                <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                                                    No overdue recipients selected.
+                                                </p>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
 
-                                                        <div className="grid gap-2 sm:grid-cols-2">
-                                                            {users.map((user) => (
-                                                                <label
-                                                                    key={user.uid}
-                                                                    className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-100 px-3 py-3 hover:bg-slate-50"
-                                                                >
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={
-                                                                            (
-                                                                                entry.recipients ||
-                                                                                []
-                                                                            ).includes(
-                                                                                user.uid
-                                                                            )
-                                                                        }
-                                                                        onChange={(event) =>
-                                                                            toggleRecipient(
-                                                                                selectedModule,
-                                                                                entry.daysBefore,
-                                                                                user.uid,
-                                                                                event.target.checked
-                                                                            )
-                                                                        }
-                                                                        className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                                                                    />
-
-                                                                    <span className="min-w-0">
-                                                                        <span className="block text-sm font-medium text-slate-800">
-                                                                            {user.name}
-                                                                        </span>
-
-                                                                        <span className="block break-all text-xs text-slate-500">
-                                                                            {user.email}
-                                                                        </span>
-
-                                                                        <span className="mt-1 inline-block rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                                                                            {user.role}
-                                                                        </span>
-                                                                    </span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {(!entry.recipients ||
-                                                    entry.recipients.length === 0) && (
-                                                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
-                                                        No recipients selected
-                                                        for this reminder day.
-                                                    </p>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
+                                {!currentModuleSettings.overdueEnabled && (
+                                    <p className="mt-3 rounded-lg bg-white p-3 text-sm text-slate-600">
+                                        Overdue emails are disabled for this module.
+                                    </p>
                                 )}
                             </div>
 
-                            {/* Email time */}
-                            <div className="rounded-xl border border-slate-200 p-4">
-                                <h2 className="text-base font-bold text-slate-900">
-                                    Email Delivery Time
-                                </h2>
-
-                                <label className="mt-4 block text-sm font-semibold text-slate-700">
-                                    Send reminder emails at
-                                    <select
-                                        value={emailTime}
-                                        onChange={(event) =>
-                                            setEmailTime(event.target.value)
-                                        }
-                                        className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-base font-normal outline-none focus:border-blue-600"
-                                    >
-                                        {EMAIL_TIME_OPTIONS.map((time) => (
-                                            <option
-                                                key={time}
-                                                value={time}
-                                            >
-                                                {formatTimeLabel(time)}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </label>
-
-                                <div className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">
-                                    <strong>Time Zone:</strong> India Standard
-                                    Time (Asia/Kolkata)
-                                    <br />
-                                    <strong>Selected Time:</strong>{" "}
-                                    {formatTimeLabel(emailTime)} IST
-                                </div>
-                            </div>
-
-                            {/* Summary */}
+                            {/* Configuration Summary */}
                             <div className="rounded-xl border border-slate-200 p-4">
                                 <h2 className="text-base font-bold text-slate-900">
                                     Configuration Summary
                                 </h2>
 
-                                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
                                     <div className="rounded-lg bg-slate-50 p-3">
                                         <p className="text-xs text-slate-500">
                                             Modules
                                         </p>
+
                                         <p className="mt-1 text-xl font-bold text-slate-900">
                                             {MODULES.length}
                                         </p>
@@ -711,35 +1003,46 @@ export default function ReminderSettingsPage() {
                                         <p className="text-xs text-slate-500">
                                             Active Users Available
                                         </p>
+
                                         <p className="mt-1 text-xl font-bold text-slate-900">
                                             {users.length}
                                         </p>
                                     </div>
 
-                                    <div className="col-span-2 rounded-lg bg-slate-50 p-3 sm:col-span-1">
+                                    <div className="rounded-lg bg-slate-50 p-3">
                                         <p className="text-xs text-slate-500">
-                                            User Assignments
+                                            Expiry Assignments
                                         </p>
+
                                         <p className="mt-1 text-xl font-bold text-slate-900">
                                             {totalAssignments}
+                                        </p>
+                                    </div>
+
+                                    <div className="rounded-lg bg-slate-50 p-3">
+                                        <p className="text-xs text-slate-500">
+                                            Overdue Assignments
+                                        </p>
+
+                                        <p className="mt-1 text-xl font-bold text-slate-900">
+                                            {totalOverdueAssignments}
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
-                            {/* Current stage warning */}
+                            {/* Notice */}
                             <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
                                 <p className="font-bold">
-                                    Configuration Only
+                                    Settings Configuration
                                 </p>
 
                                 <p className="mt-1">
-                                    These settings will be saved in Firestore.
-                                    The email reminder function is not being
-                                    changed in this stage, so the new
-                                    module-wise recipient configuration will
-                                    not affect email delivery until routing
-                                    implementation is done separately.
+                                    Settings are saved in Firestore. The email sender
+                                    must read these settings for module status,
+                                    regular reminder frequency, overdue reminder
+                                    frequency, schedules and recipients to control
+                                    actual email delivery.
                                 </p>
                             </div>
 
@@ -759,9 +1062,7 @@ export default function ReminderSettingsPage() {
                             <div className="flex flex-wrap gap-3">
                                 <button
                                     type="button"
-                                    onClick={() =>
-                                        router.push("/dashboard/users")
-                                    }
+                                    onClick={() => router.push("/dashboard/users")}
                                     disabled={saving}
                                     className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                                 >

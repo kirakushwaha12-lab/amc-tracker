@@ -774,9 +774,7 @@ export default function SoftwareLicensePage() {
 
         if (
             !form.licenseName.trim() ||
-            !form.vendor.trim() ||
-            !form.startDate ||
-            !form.expiryDate
+            !form.vendor.trim()
         ) {
             setFormError(
                 "Please fill in all required fields marked with *."
@@ -784,19 +782,14 @@ export default function SoftwareLicensePage() {
             return;
         }
 
-        if (form.expiryDate < form.startDate) {
+        if (
+            form.startDate &&
+            form.expiryDate &&
+            form.expiryDate < form.startDate
+        ) {
             setFormError(
                 "Expiry Date cannot be before Start Date."
             );
-            return;
-        }
-
-        if (
-            form.cost === "" ||
-            !Number.isFinite(Number(form.cost)) ||
-            Number(form.cost) < 0
-        ) {
-            setFormError("Please enter a valid license cost.");
             return;
         }
 
@@ -811,7 +804,7 @@ export default function SoftwareLicensePage() {
                 vendor: form.vendor.trim(),
                 startDate: form.startDate,
                 expiryDate: form.expiryDate,
-                cost: Number(form.cost),
+                cost: form.cost === "" ? "" : Number(form.cost),
                 branchUnit: form.branchUnit.trim(),
                 remarks: form.remarks.trim(),
                 updatedAt: serverTimestamp(),
@@ -984,8 +977,8 @@ export default function SoftwareLicensePage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-2">
+                        {canEditRecords && (
                             <button
                                 type="button"
                                 onClick={openAddForm}
@@ -994,17 +987,17 @@ export default function SoftwareLicensePage() {
                             >
                                 + Add Software License
                             </button>
+                        )}
 
-                            <button
-                                type="button"
-                                onClick={() => setShowRenewalHistory(true)}
-                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        </div>
-                    )}
+                        <button
+                            type="button"
+                            onClick={() => setShowRenewalHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
+                    </div>
                 </div>
 
                 {notice && (
@@ -1413,9 +1406,9 @@ export default function SoftwareLicensePage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Start Date *
+                                Start Date
                                 <input
-                                    required
+
                                     type="date"
                                     name="startDate"
                                     data-ocr-aliases="Start Date|License Start Date|Subscription Start Date|Purchase Date|Effective Date"
@@ -1426,9 +1419,9 @@ export default function SoftwareLicensePage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Expiry Date *
+                                Expiry Date
                                 <input
-                                    required
+
                                     type="date"
                                     min={form.startDate || undefined}
                                     name="expiryDate"
@@ -1440,9 +1433,9 @@ export default function SoftwareLicensePage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Cost / Charges (₹) *
+                                Cost / Charges (₹)
                                 <input
-                                    required
+
                                     type="number"
                                     min="0"
                                     step="0.01"

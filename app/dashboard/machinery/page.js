@@ -674,15 +674,7 @@ export default function MachineryPage() {
             );
             return;
         }
-        if (
-            renewingId &&
-            (!form.lastServiceDate || !form.nextDueDate)
-        ) {
-            setFormError(
-                "Please enter Last Service Date and Next Due Date for Machinery renewal."
-            );
-            return;
-        }
+
         if (
             form.serviceCharges !== "" &&
             (!Number.isFinite(Number(form.serviceCharges)) ||
@@ -704,48 +696,28 @@ export default function MachineryPage() {
         }
 
         if (form.amcApplicable === "Yes") {
-            if (
-                !form.amcVendor.trim() ||
-                !form.amcStartDate ||
-                !form.amcEndDate ||
-                form.amcCharges === ""
-            ) {
+            if (!form.amcVendor.trim()) {
                 setFormError(
-                    "Please fill AMC Company / Vendor, AMC Start Date, AMC End Date and AMC Charges."
+                    "Please fill AMC Company / Vendor."
                 );
                 return;
             }
 
-            if (form.amcEndDate < form.amcStartDate) {
+            if (
+                form.amcStartDate &&
+                form.amcEndDate &&
+                form.amcEndDate < form.amcStartDate
+            ) {
                 setFormError(
                     "AMC End Date cannot be before AMC Start Date."
                 );
                 return;
             }
 
-            if (
-                !Number.isFinite(Number(form.amcCharges)) ||
-                Number(form.amcCharges) < 0
-            ) {
-                setFormError("Please enter valid AMC Charges.");
-                return;
-            }
+
         }
 
-        const normalizedMachineNo = normalizeMachineNo(form.machineNo);
 
-        const duplicateRecord = records.find(
-            (record) =>
-                normalizeMachineNo(record.machineNo) === normalizedMachineNo &&
-                record.id !== (editingId || renewingId)
-        );
-
-        if (duplicateRecord) {
-            setFormError(
-                "A machinery record with this Machine No. already exists."
-            );
-            return;
-        }
 
         setSaving(true);
 
@@ -800,7 +772,7 @@ export default function MachineryPage() {
                         ? form.amcEndDate
                         : "",
                 amcCharges:
-                    form.amcApplicable === "Yes"
+                    form.amcApplicable === "Yes" && form.amcCharges !== ""
                         ? Number(form.amcCharges)
                         : "",
                 remarks: form.remarks.trim(),
@@ -980,10 +952,10 @@ export default function MachineryPage() {
         "Next Due Date",
         "Service Provider / Company",
         "Service Charges",
+        "AMC Applicable",
 
         ...(showAmcColumns
             ? [
-                "AMC",
                 "AMC Company / Vendor",
                 "AMC Charges",
                 "AMC Start Date",
@@ -991,6 +963,7 @@ export default function MachineryPage() {
             ]
             : []),
 
+        "Remarks",
         "Overall Status",
         "Actions",
     ];
@@ -1021,26 +994,24 @@ export default function MachineryPage() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                         {canEditRecords && (
-                            <>
-                                <button
-                                    type="button"
-                                    onClick={openAddForm}
-                                    className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                    style={{ backgroundColor: BLUE }}
-                                >
-                                    + Add Machinery Record
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={() => setShowRenewalHistory(true)}
-                                    className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                    style={{ backgroundColor: BLUE }}
-                                >
-                                    Renewal History
-                                </button>
-                            </>
+                            <button
+                                type="button"
+                                onClick={openAddForm}
+                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                                style={{ backgroundColor: BLUE }}
+                            >
+                                + Add Machinery Record
+                            </button>
                         )}
+
+                        <button
+                            type="button"
+                            onClick={() => setShowRenewalHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
                     </div>
                 </div>
 
@@ -1207,7 +1178,7 @@ export default function MachineryPage() {
 
                     <div className="overflow-x-auto">
                         <table
-                            className={`w-full ${showAmcColumns ? "min-w-[1900px]" : "min-w-[1200px]"} text-left text-sm`}
+                            className={`w-full ${showAmcColumns ? "min-w-[2100px]" : "min-w-[1400px]"} text-left text-sm`}
                         >
                             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
@@ -1264,12 +1235,12 @@ export default function MachineryPage() {
                                             {money(record.serviceCharges)}
                                         </td>
 
+                                        <td className="whitespace-nowrap px-4 py-4">
+                                            {isAmcApplicable(record) ? "Yes" : "No"}
+                                        </td>
+
                                         {showAmcColumns && (
                                             <>
-                                                <td className="whitespace-nowrap px-4 py-4">
-                                                    {isAmcApplicable(record) ? "Yes" : "No"}
-                                                </td>
-
                                                 <td className="whitespace-nowrap px-4 py-4">
                                                     {isAmcApplicable(record)
                                                         ? record.amcVendor || "—"
@@ -1295,7 +1266,11 @@ export default function MachineryPage() {
                                                 </td>
                                             </>
                                         )}
-
+                                        <td className="min-w-[200px] max-w-[350px] px-4 py-4">
+                                            <div className="whitespace-normal break-words text-slate-600">
+                                                {record.remarks?.trim() || "—"}
+                                            </div>
+                                        </td>
                                         <td className="whitespace-nowrap px-4 py-4">
                                             <StatusBadge status={record.status} />
                                         </td>
@@ -1568,9 +1543,9 @@ export default function MachineryPage() {
                                                 </label>
 
                                                 <label className="text-sm font-medium text-slate-700">
-                                                    AMC Charges (₹) *
+                                                    AMC Charges (₹)
                                                     <input
-                                                        required
+
                                                         type="number"
                                                         min="0"
                                                         step="0.01"
@@ -1583,9 +1558,9 @@ export default function MachineryPage() {
                                                 </label>
 
                                                 <label className="text-sm font-medium text-slate-700">
-                                                    AMC Start Date *
+                                                    AMC Start Date
                                                     <input
-                                                        required
+
                                                         type="date"
                                                         name="amcStartDate"
                                                         value={form.amcStartDate}
@@ -1595,9 +1570,9 @@ export default function MachineryPage() {
                                                 </label>
 
                                                 <label className="text-sm font-medium text-slate-700">
-                                                    AMC End Date *
+                                                    AMC End Date
                                                     <input
-                                                        required
+
                                                         type="date"
                                                         min={form.amcStartDate || undefined}
                                                         name="amcEndDate"

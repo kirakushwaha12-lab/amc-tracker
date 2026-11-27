@@ -668,8 +668,7 @@ export default function CompliancePage() {
         if (
             !form.complianceType ||
             !form.examinationType.trim() ||
-            !form.unit.trim() ||
-            !form.validTill
+            !form.unit.trim()
         ) {
             setFormError("Please fill in all required fields marked with *.");
             return;
@@ -844,8 +843,8 @@ export default function CompliancePage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                        {canEditRecords && (
                             <button
                                 type="button"
                                 onClick={openAddForm}
@@ -854,16 +853,17 @@ export default function CompliancePage() {
                             >
                                 + Add Compliance Record
                             </button>
-                            <button
-                                type="button"
-                                onClick={() => setShowRenewalHistory(true)}
-                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        </div>
-                    )}
+                        )}
+
+                        <button
+                            type="button"
+                            onClick={() => setShowRenewalHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
+                    </div>
                 </div>
 
                 {notice && (
@@ -1288,11 +1288,11 @@ export default function CompliancePage() {
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Valid Till *
+                                            Valid Till
                                         </label>
 
                                         <input
-                                            required
+
                                             type="date"
                                             name="validTill"
                                             value={form.validTill}

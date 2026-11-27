@@ -750,7 +750,7 @@ export default function DashboardLayout({ children }) {
                     const event = entry.event;
 
                     return {
-                        id: `${source}-${record.id}-${index}-${event}-${daysRemaining}`,
+                        id: `${source}-${record.id}-${index}-${event}-${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`,
                         title: getNotificationTitle(
                             daysRemaining,
                             event

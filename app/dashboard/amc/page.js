@@ -902,25 +902,18 @@ export default function AMCPage() {
         if (
             !form.productName.trim() ||
             !form.vendor.trim() ||
-            !form.startDate ||
-            !form.endDate ||
             !form.branchUnit.trim()
         ) {
             setFormError("Please fill in all required fields marked with *.");
             return;
         }
 
-        if (form.endDate < form.startDate) {
-            setFormError("Expiry Date cannot be before Start Date.");
-            return;
-        }
-
         if (
-            form.cost === "" ||
-            !Number.isFinite(Number(form.cost)) ||
-            Number(form.cost) < 0
+            form.startDate &&
+            form.endDate &&
+            form.endDate < form.startDate
         ) {
-            setFormError("Please enter a valid AMC charge.");
+            setFormError("Expiry Date cannot be before Start Date.");
             return;
         }
 
@@ -1107,16 +1100,14 @@ export default function AMCPage() {
                             </button>
                         )}
 
-                        {canEditRecords && (
-                            <button
-                                type="button"
-                                onClick={() => setShowHistory(true)}
-                                className="inline-flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        )}
+                        <button
+                            type="button"
+                            onClick={() => setShowHistory(true)}
+                            className="inline-flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
                     </div>
                 </div>
 
@@ -1472,9 +1463,9 @@ export default function AMCPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Start Date *
+                                Start Date
                                 <input
-                                    required
+
                                     type="date"
                                     name="startDate"
                                     data-ocr-aliases="Service Start Date|AMC Start Date|Contract Start Date|Valid From|Period From|AMC Period From|Service Period From|Contract Period From"
@@ -1485,9 +1476,9 @@ export default function AMCPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Expiry Date *
+                                Expiry Date
                                 <input
-                                    required
+
                                     type="date"
                                     min={form.startDate || undefined}
                                     name="endDate"
@@ -1499,9 +1490,9 @@ export default function AMCPage() {
                             </label>
 
                             <label className="text-sm font-medium text-slate-700">
-                                Charges (₹) *
+                                Charges (₹)
                                 <input
-                                    required
+
                                     type="number"
                                     min="0"
                                     step="0.01"

@@ -31,6 +31,7 @@ const initialForm = {
     productName: "",
     productId: "",
     policyNo: "",
+    userName: "",
     renewalDate: "",
     companyVendor: "",
     startDate: "",
@@ -287,6 +288,7 @@ export default function InsurancePage() {
                                     id: item.id,
                                     ...data,
                                     renewalDate: data.renewalDate ?? "",
+                                    userName: data.userName ?? data.user ?? "",
                                     companyVendor:
                                         data.companyVendor ??
                                         data.insuranceCompany ??
@@ -419,6 +421,7 @@ export default function InsurancePage() {
                 policy.productName,
                 policy.productId,
                 policy.policyNo,
+                policy.userName,
                 policy.companyVendor,
                 policy.remarks,
             ].some((value) =>
@@ -497,6 +500,7 @@ export default function InsurancePage() {
             productName: policy.productName ?? "",
             productId: policy.productId ?? "",
             policyNo: policy.policyNo ?? "",
+            userName: policy.userName ?? "",
             renewalDate: policy.renewalDate ?? "",
             companyVendor: policy.companyVendor ?? "",
             startDate: policy.startDate ?? "",
@@ -657,6 +661,7 @@ export default function InsurancePage() {
             productName: policy.productName ?? "",
             productId: policy.productId ?? "",
             policyNo: "",
+            userName: policy.userName ?? "",
             renewalDate: "",
             companyVendor: policy.companyVendor ?? "",
             startDate: "",
@@ -710,27 +715,12 @@ export default function InsurancePage() {
             return;
         }
 
-        if (!form.startDate) {
-            setFormError("Start Date is required.");
-            return;
-        }
-
-        if (!form.expiryDate) {
-            setFormError("Expiry Date is required.");
-            return;
-        }
-
-        if (form.expiryDate < form.startDate) {
-            setFormError("Expiry Date cannot be before Start Date.");
-            return;
-        }
-
         if (
-            form.amount === "" ||
-            !Number.isFinite(Number(form.amount)) ||
-            Number(form.amount) < 0
+            form.startDate &&
+            form.expiryDate &&
+            form.expiryDate < form.startDate
         ) {
-            setFormError("Please enter a valid Amount.");
+            setFormError("Expiry Date cannot be before Start Date.");
             return;
         }
 
@@ -743,6 +733,7 @@ export default function InsurancePage() {
                 productName: form.productName.trim(),
                 productId: form.productId.trim(),
                 policyNo: form.policyNo.trim(),
+                userName: form.userName.trim(),
                 renewalDate: form.renewalDate,
                 companyVendor: form.companyVendor.trim(),
                 startDate: form.startDate,
@@ -892,8 +883,8 @@ export default function InsurancePage() {
                         </p>
                     </div>
 
-                    {canEditRecords && (
-                        <div className="flex flex-wrap gap-3">
+                    <div className="flex flex-wrap gap-3">
+                        {canEditRecords && (
                             <button
                                 type="button"
                                 onClick={openAddForm}
@@ -902,17 +893,17 @@ export default function InsurancePage() {
                             >
                                 + Add Insurance Record
                             </button>
+                        )}
 
-                            <button
-                                type="button"
-                                onClick={() => setShowHistory(true)}
-                                className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
-                                style={{ backgroundColor: BLUE }}
-                            >
-                                Renewal History
-                            </button>
-                        </div>
-                    )}
+                        <button
+                            type="button"
+                            onClick={() => setShowHistory(true)}
+                            className="rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-90"
+                            style={{ backgroundColor: BLUE }}
+                        >
+                            Renewal History
+                        </button>
+                    </div>
                 </div>
 
                 {notice && (
@@ -1068,6 +1059,7 @@ export default function InsurancePage() {
                                             "Product Name",
                                             "Product ID",
                                             "Policy No.",
+                                            "User Name",
                                             "Renewal Date",
                                             "Company / Vendor",
                                             "Start Date",
@@ -1107,6 +1099,10 @@ export default function InsurancePage() {
 
                                             <td className="whitespace-nowrap px-4 py-4 text-slate-700">
                                                 {policy.policyNo || "—"}
+                                            </td>
+
+                                            <td className="whitespace-nowrap px-4 py-4 text-slate-700">
+                                                {policy.userName || "—"}
                                             </td>
 
                                             <td className="whitespace-nowrap px-4 py-4 text-slate-600">
@@ -1197,7 +1193,7 @@ export default function InsurancePage() {
 
                                     {filteredPolicies.length === 0 && (
                                         <tr>
-                                            <td colSpan={12} className="px-5 py-12 text-center">
+                                            <td colSpan={13} className="px-5 py-12 text-center">
                                                 <p className="font-medium text-slate-700">
                                                     No insurance records found
                                                 </p>
@@ -1296,7 +1292,19 @@ export default function InsurancePage() {
                                             className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
                                         />
                                     </div>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                                            User Name
+                                        </label>
 
+                                        <input
+                                            name="userName"
+                                            value={form.userName}
+                                            onChange={handleChange}
+                                            placeholder="Enter responsible user name"
+                                            className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
+                                        />
+                                    </div>
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
                                             Renewal Date
@@ -1328,10 +1336,10 @@ export default function InsurancePage() {
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Start Date *
+                                            Start Date
                                         </label>
                                         <input
-                                            required
+
                                             type="date"
                                             name="startDate"
                                             data-ocr-range-label="Period of Insurance"
@@ -1345,10 +1353,10 @@ export default function InsurancePage() {
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Expiry Date *
+                                            Expiry Date
                                         </label>
                                         <input
-                                            required
+
                                             type="date"
                                             min={form.startDate || undefined}
                                             name="expiryDate"
@@ -1363,10 +1371,10 @@ export default function InsurancePage() {
 
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                                            Amount (₹) *
+                                            Amount (₹)
                                         </label>
                                         <input
-                                            required
+
                                             type="number"
                                             min="0"
                                             step="0.01"
