@@ -879,28 +879,17 @@ async function main() {
 
     if (!timeCheck.reached) {
         console.log(
-            `Email time not reached. Skipping this run. Next eligible time: ${emailTime} IST.`
+            `Email time not reached. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST. Records will still be checked.`
         );
-        return;
-    }
-
-    if (!timeCheck.reached) {
+    } else if (!timeCheck.withinWindow) {
         console.log(
-            `Email time not reached. Skipping. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST.`
+            `SEND WINDOW EXPIRED. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST; elapsed: ${timeCheck.elapsedMinutes} minutes. Emails blocked, but records and routing will still be checked.`
         );
-        return;
-    }
-
-    if (!timeCheck.withinWindow) {
+    } else {
         console.log(
-            `SEND WINDOW EXPIRED. Skipping today's send. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST; elapsed: ${timeCheck.elapsedMinutes} minutes. Allowed window: ${EMAIL_SEND_WINDOW_MINUTES} minutes.`
+            `Send window active. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST; elapsed: ${timeCheck.elapsedMinutes} minutes.`
         );
-        return;
     }
-
-    console.log(
-        `Send window active. Scheduled: ${emailTime} IST; current: ${timeCheck.currentTime} IST; elapsed: ${timeCheck.elapsedMinutes} minutes.`
-    );
 
     // Read all valid expiry/due records.
     const records = await getAllExpiryRecords(today);
@@ -938,7 +927,14 @@ async function main() {
     }
 
     console.log("========== END ROUTING PREVIEW ==========\n");
-
+    // Block email sending outside the allowed time window.
+    // Records and routing preview will still be available.
+    if (!timeCheck.withinWindow) {
+        console.log(
+            "Outside the allowed email send window. Records and routing were checked, but no emails will be sent."
+        );
+        return;
+    }
     // Dry run: show actual configured routing but send nothing.
     if (ROUTING_DRY_RUN) {
         console.log(
